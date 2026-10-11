@@ -42,11 +42,20 @@ describe("funded PostgreSQL CI coverage", () => {
     ]) });
     expect(executeSettlementStep(undefined, step)).toMatchObject({ status: 1, args: [] });
   });
+  it("executes isolated pre-send races under the disposable PostgreSQL environment", () => {
+    const step = job.steps.find(candidate => candidate.run?.includes("tests/gateway/bots/integration-grant-source-postgres.test.ts"))!;
+    const result = executeSettlementStep(job.env.MATRIX_TEST_POSTGRES_URL, step);
+    expect(result).toMatchObject({ status: 0, args: expect.arrayContaining([
+      "tests/gateway/bots/funded-inference-timeout.test.ts", "--maxWorkers=1", "--no-file-parallelism",
+    ]) });
+    expect(executeSettlementStep(undefined, step)).toMatchObject({ status: 1, args: [] });
+  });
   it("executes waiver and private CLI regressions under the disposable PostgreSQL job", () => {
     const result = executeSettlementStep(job.env.MATRIX_TEST_POSTGRES_URL);
     expect(result.status).toBe(0);
     expect(result.args).toEqual(expect.arrayContaining([
       "run", "test", "--", "tests/platform/ai-funded-usage-postgres.test.ts",
+      "tests/platform/ai-funded-model-probes-postgres.test.ts",
       "tests/platform/ai-funded-recovery-migration.test.ts",
       "tests/platform/ai-funded-usage-waiver.test.ts", "tests/platform/ai-funded-usage-waiver-cli.test.ts",
       "tests/platform/ai-funded-usage-waiver-locks-postgres.test.ts",
