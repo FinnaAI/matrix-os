@@ -167,6 +167,7 @@ fi
 if [[ "$*" == *"exec vitest run"* ]]; then
   if [[ "$*" != *"--config vitest.e2e.config.ts"* && "$*" == *"--outputFile="* ]]; then
     if [[ "$REQUIRE_CONCURRENT" == 1 ]]; then await_peer unit checks; fi
+    printf 'profile-sort %s\\n' "\${MATRIX_TEST_PROFILE_SORT:-0}" >> "$CALLS"
     [[ "$FAIL_LANE" != unit ]] || exit 42
     for argument in "$@"; do
       if [[ "$argument" == --outputFile=* && "$FAIL_LANE" != coverage-missing ]]; then
@@ -201,7 +202,7 @@ fi`);
       encoding: "utf8", timeout: 10_000,
       env: {
         ...process.env, PATH: `${bin}:${process.env.PATH}`, CALLS: resolve(dir, "calls"),
-        HARNESS_DIR: dir, REVIEWED_SHA: sha, FAIL_LANE: failLane, REAL_NODE: process.execPath, FIXTURE_REPO: resolve(work, "repo"),
+        HARNESS_DIR: dir, REVIEWED_SHA: sha, FAIL_LANE: failLane, MATRIX_TEST_PROFILE_SORT: "0", REAL_NODE: process.execPath, FIXTURE_REPO: resolve(work, "repo"),
         DISPLAYS: resolve(dir, "displays"),
         REQUIRE_CONCURRENT: ["full", "qualification"].includes(suite) ? "1" : "0",
         TYPECHECK_WRAPPER: fixtureScripts.typecheck,
@@ -378,6 +379,20 @@ describe("eight-core full benchmark budget", () => {
 });
 
  describe("single-pass Linux qualification", () => {
+  it("models Linux PostgreSQL admission and cleanup in the mocked qualification",()=>{
+    const {result,calls}=invoke("qualification");
+    expect(result.status,result.stderr).toBe(0);
+    expect(calls.filter(call=>call === "fixture-start")).toHaveLength(1);
+    expect(calls.filter(call=>call === "fixture-stop")).toHaveLength(1);
+  });
+  it("enables measured profile ordering only for qualification",()=>{
+    const qualified=invoke("qualification");
+    expect(qualified.result.status,qualified.result.stderr).toBe(0);
+    expect(qualified.calls).toContain("profile-sort 1");
+    const historical=invoke("full");
+    expect(historical.result.status,historical.result.stderr).toBe(0);
+    expect(historical.calls.filter(call=>call === "profile-sort 0")).toHaveLength(2);
+  });
   it("proves the unit-collected parity once while historical full keeps both dedicated parity runs",()=>{
     const qualified=invoke("qualification");
     expect(qualified.result.status,qualified.result.stderr).toBe(0);
