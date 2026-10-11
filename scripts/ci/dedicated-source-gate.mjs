@@ -2,9 +2,11 @@
 // CI Results remains the genuine Actions aggregate and is never modified here.
 import {assertDefaultController,verifyCurrentDedicatedSource,verifyCurrentHostedSource} from './dedicated-admission.mjs';
 import {authenticatedRequestingRun} from './dedicated-refresh.mjs';
+import {verifyFullHostedCoverage} from './dedicated-hosted.mjs';
 import {waitForDedicatedResult} from './dedicated-result.mjs';
 import {readReviewedConfiguration} from './dedicated-api.mjs';
 import {newestWorkflowRun} from './dedicated-history.mjs';
+import {reconcileMainSourceQualification} from './dedicated-main-source-gate.mjs';
 const request={timeout:10_000};
 const id=value=>Number.isSafeInteger(value)&&value>0;
 const sha=/^[a-f0-9]{40}$/;
@@ -37,6 +39,7 @@ async function ownedGate(github,repo,pull,workflow,appId){
   // Scheduled/main-push definitions must never inherit a candidate-branch
   // run's app identity. PTR metadata describes the live PR head separately.
   if(['push','schedule'].includes(run.event)&&(run.head_branch!=='main'||!sha.test(run.head_sha||'')))continue;
+  if(pull.number===0&&(evidence.sourceKind!=='main'||evidence.headSha!==pull.head.sha||run.head_branch!=='main'||(run.event==='workflow_run'&&run.head_sha!==pull.head.sha)))continue;
   if(run.event==='pull_request_target'&&(run.head_sha!==pull.head.sha||run.head_branch!==pull.head.ref))continue;
   if(run.event==='workflow_run'&&run.head_branch!=='main'&&(run.head_sha!==pull.head.sha||run.head_branch!==pull.head.ref))continue;
   return{prior:{check,evidence},history};
@@ -53,7 +56,7 @@ async function currentRequester(github,repo,snapshot,options={}){
   if(!authenticated)return false;
   if(options.afterId!==undefined&&(run.id<=options.afterId||!Number.isFinite(Date.parse(run.created_at))||Date.parse(run.created_at)<Date.parse(options.notBefore)))return false;
   return true;
- },{kind:'requester',headSha:snapshot.headSha,headRef:snapshot.headRef});
+ },{kind:'requester',sourceKind:snapshot.sourceKind,headSha:snapshot.headSha,headRef:snapshot.headRef});
 }
 async function verifyHostedReplacement(github,repo,run){
  const {data}=await github.rest.actions.listJobsForWorkflowRun({...repo,run_id:run.id,filter:'latest',per_page:100,request});
@@ -86,7 +89,7 @@ export async function reconcileSourceQualification(github,repo,controller,option
   examined++;
   const {prior,history}=await ownedGate(github,repo,pull,workflow,options.gateAppId);
   const snapshot={prNumber:pull.number,headSha:pull.head.sha,headRef:pull.head.ref,baseSha:pull.base.sha,baseRef:pull.base.ref,sourceSha:pull.merge_commit_sha};
-  const admitted=config.admitted&&same(pull.head?.repo?.full_name,repo)&&pull.state==='open'&&pull.draft===false&&['ready-for-ci','ci-linux'].every(label=>pull.labels?.some(value=>value.name===label));
+  const admitted=config.admitted&&same(pull.head?.repo?.full_name,repo)&&pull.state==='open'&&pull.draft===false&&['ready-for-ci','fast-ci'].every(label=>pull.labels?.some(value=>value.name===label));
   const previouslyAdmitted=history||Boolean(prior&&(prior.evidence.admittedPreviously===true||prior.evidence.notApplicable!==true));
   const recovery=!admitted&&previouslyAdmitted;
   if(recovery)snapshot.executionMode='hosted-only';
@@ -124,14 +127,15 @@ export async function reconcileSourceQualification(github,repo,controller,option
   if(requester.status!=='completed'||requester.conclusion!=='success'){await write('failure','Current requesting CI is pending or failed',{requestingRunId:requester.id,requestingRunAttempt:requester.run_attempt});continue;}
   try{
    if(recovery)await verifyHostedReplacement(github,repo,requester);
-   else await waitForDedicatedResult(github,{...repo,...snapshot,requestingRunId:requester.id,requestingRunAttempt:requester.run_attempt,...config,serverUrl:'https://github.com'},{maxAttempts:1});
+   else {const result=await waitForDedicatedResult(github,{...repo,...snapshot,requestingRunId:requester.id,requestingRunAttempt:requester.run_attempt,...config,serverUrl:'https://github.com'},{maxAttempts:1,allowInfrastructureFallback:true});if(result.infrastructure){await verifyFullHostedCoverage(github,repo,requester);evidence.infrastructureFallback=true;evidence.infrastructure=result.infrastructure;}}
    const currentPull=await(recovery?verifyCurrentHostedSource:verifyCurrentDedicatedSource)(github,repo,snapshot);
-   if(recovery&&(await settings(github,repo)).admitted&&['ci-linux','ready-for-ci'].every(label=>currentPull.labels?.some(value=>value.name===label)))throw new Error('Admission changed during hosted recovery');
+   if(recovery&&(await settings(github,repo)).admitted&&['fast-ci','ready-for-ci'].every(label=>currentPull.labels?.some(value=>value.name===label)))throw new Error('Admission changed during hosted recovery');
    const latest=await currentRequester(github,repo,snapshot,recovery?{afterId:evidence.recoveryAfterRunId,notBefore:evidence.recoveryStartedAt}:{});
    if(latest?.id!==requester.id||latest.run_attempt!==requester.run_attempt||latest.conclusion!=='success')throw new Error('New requesting attempt superseded coverage');
    if(recovery){const newest=await currentRequester(github,repo,snapshot,{allModes:true});if(newest?.id!==requester.id||newest.run_attempt!==requester.run_attempt)throw new Error('A newer admission superseded hosted recovery');}
-   await write('success',recovery?'Current exact-source hosted replacement passed':'Current exact-source hosted and Linux qualification passed',{requestingRunId:requester.id,requestingRunAttempt:requester.run_attempt,...(recovery?{hostedRecovery:true}:{})});
+   await write('success',recovery?'Current exact-source hosted replacement passed':evidence.infrastructureFallback?'Current exact-source full hosted infrastructure recovery passed':'Current exact-source hosted and Linux qualification passed',{requestingRunId:requester.id,requestingRunAttempt:requester.run_attempt,...(recovery?{hostedRecovery:true}:{})});
   }catch(error){await write('failure',recovery?'Fresh genuine hosted replacement evidence is missing or stale':'Fresh authenticated Linux evidence is missing or stale');if(!(error instanceof Error))throw error;}
  }
+ if(!options.prNumber)examined+=await reconcileMainSourceQualification(github,repo,controller,options,config,workflow,{ownedGate,currentRequester});
  return{examined,dispatched};
 }

@@ -11,10 +11,24 @@ const scripts = JSON.parse(readFileSync(join(process.cwd(), 'package.json'), 'ut
 const runs = (job: Job) => job.steps.map(step => step.run ?? '').join('\n');
 
 describe('fast CI preserves validation while removing serialized work', () => {
-  it('starts independent unit, sync, build and E2E validation after classification', () => {
-    for (const id of ['unit', 'e2e', 'sync-client', 'shell-production-build']) {
-      expect(workflow.jobs[id].needs, id).toBe('changes');
+  it('installs the real pattern scanner dependency before every unit shard', () => {
+    const steps = workflow.jobs.unit.steps;
+    const scanner = steps.findIndex(step => step.run === 'sudo apt-get install -y ripgrep');
+    const test = steps.findIndex(step => step.run?.startsWith('bun run test --'));
+    expect(scanner).toBeGreaterThanOrEqual(0);
+    expect(scanner).toBeLessThan(test);
+    expect(steps[scanner]?.if).toBe(steps[test]?.if);
+    expect(workflow.jobs.unit.strategy?.matrix?.shard).toEqual([1, 2, 3, 4]);
+  });
+
+  it('starts independent hosted lanes after backend selection while sync starts after classification', () => {
+    expect(workflow.jobs['ci-backend'].needs).toBe('changes');
+    for (const id of ['unit', 'e2e', 'shell-production-build']) {
+      // Backend admission chooses Linux or hosted recovery; workload lanes still
+      // run in parallel rather than waiting for another workload's result.
+      expect(workflow.jobs[id].needs, id).toEqual(['changes', 'ci-backend']);
     }
+    expect(workflow.jobs['sync-client'].needs).toBe('changes');
     const gate = workflow.jobs['ci-results'];
     for (const id of ['unit', 'e2e', 'sync-client', 'shell-production-build', 'funded-postgres', 'funded-host-root']) {
       expect(gate.needs).toContain(id);
