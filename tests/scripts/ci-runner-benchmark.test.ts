@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -55,7 +56,7 @@ function expectBothNativePasses(calls: string[]) {
   expect(actual).toEqual([...expected, ...expected]);
 }
 
-function invoke(suite: string, failLane = "", historical = false, workers = "12") {
+function invoke(suite: string, failLane = "", historical = false, workers = "12", prepared: "none" | "match" | "mismatch" = "none") {
   const dir = realpathSync(mkdtempSync(resolve(tmpdir(), "matrix-benchmark-test-")));
   const bin = resolve(dir, "bin");
   const work = resolve(dir, "work");
@@ -73,10 +74,21 @@ const { relative } = require("node:path");
 appendFileSync(process.env.CALLS, "native-check " + JSON.stringify({ directory: relative(process.env.FIXTURE_REPO, process.cwd()), args: process.argv.slice(2) }) + "\\n");
 if (process.env.FAIL_LANE === "native-platform" && relative(process.env.FIXTURE_REPO, process.cwd()) === "packages/platform") process.exit(42);
 `);
+  writeFileSync(resolve(dir,"pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+  const preparedDir=resolve(dir,"prepared");
+  mkdirSync(preparedDir);
+  const fixtureInitdb = resolve(dir, "fixture-initdb");
+  writeFileSync(fixtureInitdb, "#!/bin/bash\nexit 0\n");
+  chmodSync(fixtureInitdb, 0o755);
+  writeFileSync(resolve(preparedDir,"fixture-postgres.sh"),"start_fixture_postgres() { echo fixture-start >> \"$CALLS\"; }\nstop_fixture_postgres() { echo fixture-stop >> \"$CALLS\"; }\n");
+  if(prepared !== "none") {
+    mkdirSync(resolve(preparedDir,"browsers")); mkdirSync(resolve(preparedDir,"pnpm-store"));
+    writeFileSync(resolve(preparedDir,"prepared-lock.sha256"), prepared === "match" ? createHash("sha256").update("lockfileVersion: '9.0'\n").digest("hex") : "0".repeat(64));
+  }
   writeFileSync(resolve(dir, "displays"), "");
   const fixtureScripts = { ...scripts };
   if (historical) {
-    fixtureScripts.typecheck = `bun run typecheck:build-kernel && ${scripts["typecheck:run"]}`;
+    fixtureScripts.typecheck = `bun run typecheck:build-kernel && ${fixtureScripts["typecheck:run"]}`;
     delete fixtureScripts["typecheck:run"];
   }
   writeFileSync(resolve(dir, "package.json"), JSON.stringify({ scripts: fixtureScripts }));
@@ -86,10 +98,10 @@ if (process.env.FAIL_LANE === "native-platform" && relative(process.env.FIXTURE_
   };
   // Use the production script unchanged except its container-local /work path.
   const script = resolve(dir, "benchmark.sh");
-  writeFileSync(script, readFileSync("scripts/ci/runner/benchmark.sh", "utf8").replaceAll("/work", work));
+  writeFileSync(script, readFileSync("scripts/ci/runner/benchmark.sh", "utf8").replaceAll("/work", work).replaceAll("/opt/matrix-ci", preparedDir).replaceAll("/usr/lib/postgresql/16/bin/initdb", fixtureInitdb));
   executable("git", `
 case "$1" in
-  init) mkdir -p "$2"; cp -R "$HARNESS_DIR/seed/." "$2/"; cp "$HARNESS_DIR/package.json" "$2/package.json" ;;
+  init) mkdir -p "$2"; cp -R "$HARNESS_DIR/seed/." "$2/"; cp "$HARNESS_DIR/package.json" "$2/package.json"; cp "$HARNESS_DIR/pnpm-lock.yaml" "$2/pnpm-lock.yaml" ;;
   rev-parse) echo "$REVIEWED_SHA" ;;
 esac`);
   executable("node", 'exec "$REAL_NODE" "$@"');
@@ -116,6 +128,7 @@ case "$2" in
     [[ "$FAIL_LANE" != shell ]] || exit 42
     ;;
   build:desktop)
+    if [[ "$REQUIRE_CONCURRENT" == 1 ]]; then await_peer desktop general; fi
     [[ "$FAIL_LANE" != desktop-build ]] || exit 42
     mkdir -p desktop/out/main
     touch desktop/out/main/index.js
@@ -143,6 +156,7 @@ if [[ "$*" == *"exec vitest run"* ]]; then
     if [[ "$*" != *"tests/e2e/"* || "$*" == *"--exclude="* ]]; then
       # Simulate the real describe.skip gate in the general desktop suites,
       # including suites absent from the explicit Electron regression list.
+      if [[ "$REQUIRE_CONCURRENT" == 1 ]]; then await_peer general desktop; fi
       selection=web,browser-download,shared-rail-states,chat-onboarding-live
       if [[ -f desktop/out/main/index.js ]]; then
         for name in file-download chat-picker-responsive getting-started operator hermes-conversations; do
@@ -168,7 +182,7 @@ fi`);
         ...process.env, PATH: `${bin}:${process.env.PATH}`, CALLS: resolve(dir, "calls"),
         HARNESS_DIR: dir, REVIEWED_SHA: sha, FAIL_LANE: failLane, REAL_NODE: process.execPath, FIXTURE_REPO: resolve(work, "repo"),
         DISPLAYS: resolve(dir, "displays"),
-        REQUIRE_CONCURRENT: suite === "full" ? "1" : "0",
+        REQUIRE_CONCURRENT: ["full", "qualification"].includes(suite) ? "1" : "0",
         TYPECHECK_WRAPPER: fixtureScripts.typecheck,
         TYPECHECK_BUILD: fixtureScripts["typecheck:build-kernel"],
         TYPECHECK_RUN: fixtureScripts["typecheck:run"] ?? "exit 127",
@@ -197,7 +211,7 @@ describe("isolated cold and warm benchmark execution", () => {
     for (const pass of ["cold", "warm"]) {
       const build = timings.findIndex(([label]) => label === `desktop-build-${pass}`);
       expect(build).toBeGreaterThan(-1);
-      expect(build).toBeLessThan(timings.findIndex(([label]) => label === `e2e-general-${pass}`));
+      expect(build).toBeLessThan(timings.findIndex(([label]) => label === `terminal-grid-${pass}`));
     }
   });
 
@@ -284,19 +298,21 @@ describe("isolated cold and warm benchmark execution", () => {
   });
 
   it.each(["typecheck", "checks", "full"])("%s reuses prerequisites for both no-emit passes", (suite) => {
-    const { result, calls } = invoke(suite);
+    const { result, calls, timings } = invoke(suite);
     expect(result.status, result.stderr).toBe(0);
     expect(calls.filter((call) => call === "prerequisites")).toHaveLength(1);
     expect(calls.filter((call) => call === "bun run typecheck:run")).toHaveLength(2);
+    expect(timings.filter(([label]) => label.startsWith("typecheck-"))).toHaveLength(2);
     expectBothNativePasses(calls);
   });
 
   it.each(["typecheck", "checks", "full"])("historical %s preserves its original typecheck wrapper and every check", (suite) => {
-    const { result, calls } = invoke(suite, "", true);
+    const { result, calls, timings } = invoke(suite, "", true);
     expect(result.status, result.stderr).toBe(0);
     expect(calls.filter((call) => call === "bun run typecheck:run")).toHaveLength(0);
     expect(calls.filter((call) => call === "bun run typecheck")).toHaveLength(2);
     expect(calls.filter((call) => call === "prerequisites")).toHaveLength(3);
+    expect(timings.filter(([label]) => label.startsWith("typecheck-"))).toHaveLength(2);
     expectBothNativePasses(calls);
   });
 
@@ -337,5 +353,45 @@ describe("eight-core full benchmark budget", () => {
     expect(result.status).toBe(0);
     expect(calls.some((call) => call.includes("--maxWorkers=4 --reporter=default"))).toBe(true);
     expect(calls.some((call) => call.includes("--maxWorkers=12"))).toBe(false);
+  });
+});
+
+ describe("single-pass Linux qualification", () => {
+  it.each(["", "unit"])("models Postgres admission and cleanup even when the qualification lane fails: %s", (fail) => {
+    const { result, calls } = invoke("qualification", fail);
+    expect(result.status, result.stderr).toBe(fail ? 1 : 0);
+    expect(calls.filter((call) => call === "fixture-start")).toHaveLength(1);
+    expect(calls.filter((call) => call === "fixture-stop")).toHaveLength(1);
+  });
+  it("runs every full lane once and fails when any required lane fails", () => {
+    for (const fail of ["", "unit", "checks", "shell", "general", "electron", "clipboard", "desktop-build"]) {
+      const {result,calls,timings} = invoke("qualification", fail);
+      expect(result.status, result.stderr).toBe(fail ? 1 : 0);
+      for (const lane of ["unit", "typecheck", "shell", "e2e-general", "e2e-electron", "e2e-clipboard", "terminal-grid"])
+        expect(timings.filter(([label]) => label === `${lane}-cold`)).toHaveLength(1);
+      expect(timings.some(([label]) => label.endsWith("-warm"))).toBe(false);
+      expect(calls.filter(call => call === "bun run build:desktop")).toHaveLength(1);
+    }
+  });
+ });
+
+describe("readonly prepared dependency admission",()=> {
+  it.each(["match","mismatch"] as const)("uses image browser cache only for %s lockfile", prepared=> {
+    const {result,calls,timings}=invoke("qualification","",false,"12",prepared);
+    expect(result.status,result.stderr).toBe(0);
+    expect(calls.filter(call=>call==="pnpm install --frozen-lockfile")).toHaveLength(1);
+    const browserInstalls=calls.filter(call=>call.includes("playwright install chromium"));
+    expect(browserInstalls).toHaveLength(prepared === "match" ? 0 : 2);
+    expect(timings.some(([label])=>label==="prepared-store")).toBe(prepared === "match");
+    expect(timings.some(([label])=>label==="prepared-browsers")).toBe(prepared === "match");
+  });
+});
+
+describe("bare-metal qualification worker budget",()=>{
+  it("uses sixteen requested unit workers while preserving separate bounded lanes",()=>{
+    const {result,calls}=invoke("qualification","",false,"16");
+    expect(result.status,result.stderr).toBe(0);
+    expect(calls.filter(call=>call.includes("--maxWorkers=16 --reporter=default"))).toHaveLength(1);
+    expect(calls.some(call=>call.includes("--config vitest.e2e.config.ts --maxWorkers=2"))).toBe(true);
   });
 });
