@@ -20,14 +20,14 @@ async function execute(name:string,github:unknown,context:unknown,core:unknown,h
  return new AsyncFunction('github','context','core','require','loadHelper',script)(github,context,core,nodeRequire,loadHelper);
 }
 async function admit(overrides:Record<string,unknown>={},ref='refs/heads/main') {
- vi.stubEnv('CONTROLLER_SHA',controller);vi.stubEnv('INPUT_SHA','');vi.stubEnv('GITHUB_WORKSPACE',process.cwd());vi.stubEnv('CONTROLLER_ATTEMPT','1');vi.stubEnv('MATRIX_CI_DEDICATED_ENABLED','true');vi.stubEnv('IMAGE_DIGEST','sha256:'+'e'.repeat(64));vi.stubEnv('HARNESS_DIGEST','f'.repeat(64));
+ vi.stubEnv('CONTROLLER_SHA',controller);vi.stubEnv('RACE_LOST_ERRORS',workflow().jobs.benchmark.env.RACE_LOST_ERRORS);vi.stubEnv('INPUT_SHA','');vi.stubEnv('GITHUB_WORKSPACE',process.cwd());vi.stubEnv('CONTROLLER_ATTEMPT','1');vi.stubEnv('MATRIX_CI_DEDICATED_ENABLED','true');vi.stubEnv('IMAGE_DIGEST','sha256:'+'e'.repeat(64));vi.stubEnv('HARNESS_DIGEST','f'.repeat(64));
  vi.stubEnv('CONTROLLER_WORKFLOW_REF','HamedMP/matrix-os/.github/workflows/ci-dedicated.yml@refs/heads/main');
  const original={number:2440,base:{ref:'main',sha:base,repo:{full_name:'HamedMP/matrix-os'}},merge_commit_sha:merge,state:'open',draft:false,labels:[{name:'ready-for-ci'},{name:'fast-ci'}],head:{sha:head,repo:{full_name:'HamedMP/matrix-os'}}};
  const pull={...structuredClone(original),...overrides};
  const github={rest:{pulls:{get:vi.fn(async()=>({data:pull}))},repos:{getBranch:vi.fn(async(args:any)=>({data:{name:args.branch,commit:{sha:base}}})),getCommit:vi.fn(async()=>({data:{sha:merge,parents:[{sha:base},{sha:head}]}}))},actions:{getWorkflow:vi.fn(async()=>({data:{id:98,path:'.github/workflows/ci.yml'}})),listWorkflowRuns:vi.fn(async()=>({data:{workflow_runs:[{id:77,run_attempt:1,workflow_id:98,event:'pull_request',path:'.github/workflows/ci.yml',head_sha:head,status:'in_progress',repository:{full_name:'HamedMP/matrix-os'},head_repository:{full_name:'HamedMP/matrix-os'},display_title:`CI coverage-v1 · ${merge}`,pull_requests:[{number:2440,head:{sha:head},base:{sha:base,ref:'main'}}]}]}}))},checks:{create:vi.fn(async(_args:{output:{summary:string}})=>({data:{id:123}})),update:vi.fn(async(_args:{conclusion:string})=>({data:{}}))}}};
  const context={repo:{owner:'HamedMP',repo:'matrix-os'},sha:controller,ref,eventName:'pull_request_target',payload:{repository:{id:42},action:'synchronize',pull_request:original},serverUrl:'https://github.com',runId:1};
  const outputs:Record<string,string>={};
- const core={setOutput:(key:string,value:string)=>outputs[key]=value,warning:vi.fn(),setFailed:vi.fn()};
+ const core={setOutput:(key:string,value:string)=>outputs[key]=value,warning:vi.fn(),notice:vi.fn(),setFailed:vi.fn()};
  await execute('Admit current source head',github,context,core);
  return{outputs,github,pull,context,core};
 }
@@ -69,8 +69,10 @@ describe('dedicated CI trusted dispatcher integration',()=>{
  it('revalidates after admission and refuses dispatch when the parent moved',async()=>{
   const {outputs,github,pull,context,core}=await admit();vi.stubEnv('SNAPSHOT',JSON.stringify(outputs));
   await execute('Revalidate exact PR snapshot before dispatch',github,context,core);expect(outputs.current).toBe('true');
-  pull.base.sha='e'.repeat(40);
-  await expect(execute('Revalidate exact PR snapshot before dispatch',github,context,core)).rejects.toThrow(/stale/);
+  pull.base.sha='e'.repeat(40);delete outputs.current;
+  // A moved parent stands the controller down: no dispatch credit, neutral settlement.
+  await execute('Revalidate exact PR snapshot before dispatch',github,context,core);
+  expect(outputs.current).toBeUndefined();expect(outputs.superseded).toBe('true');
  });
  it.each(['success','failure','skipped'])('settles dispatch %s without treating skipped work as success',async outcome=>{
   const {outputs,github,context,core}=await admit();
@@ -78,11 +80,12 @@ describe('dedicated CI trusted dispatcher integration',()=>{
   await execute('Settle source-head check',github,context,core);
   expect(github.rest.checks.update.mock.calls[0][0].conclusion).toBe('failure'); // Exit-only or missing receipt evidence can never qualify.
  });
- it('fails settlement and logs revalidation failure when successful execution became stale',async()=>{
+ it('settles a successful execution whose source became stale as neutral without receipt credit',async()=>{
   const {outputs,github,pull,context,core}=await admit();pull.base.ref='another-parent';
   for(const [key,value] of Object.entries({CHECK_ID:outputs.check_id,HEAD_SHA:head,MERGE_PARENT_SHA:base,MERGE_PARENTS:JSON.stringify([base,head]),BASE_SHA:base,BASE_REF:'main',PR_NUMBER:'2440',SOURCE_SHA:merge,DISPATCH_OUTCOME:'success',SUITE:'qualification'}))vi.stubEnv(key,value);
   await execute('Settle source-head check',github,context,core);
-  expect(core.warning).toHaveBeenCalledOnce();expect(core.setFailed).toHaveBeenCalledOnce();expect(github.rest.checks.update.mock.calls[0][0].conclusion).toBe('failure');
+  expect(core.setFailed).not.toHaveBeenCalled();const settled=github.rest.checks.update.mock.calls[0][0];
+  expect(settled.conclusion).toBe('neutral');expect(JSON.parse(settled.output.summary)).toMatchObject({superseded:true,receiptVerified:false});
  });
  it('completes the source check as failed when credential cleanup fails',async()=>{
   const {outputs,github,context,core}=await admit();
