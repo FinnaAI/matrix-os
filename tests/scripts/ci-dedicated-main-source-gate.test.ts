@@ -231,3 +231,34 @@ it('wires the main-only immutable proof after the actual detector and route, wit
  expect(upload.uses).toBe('actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a');expect(upload.with).toEqual({name:'main-ci-decision-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}',path:'${{ runner.temp }}/main-ci-decision/receipt.json','if-no-files-found':'error','retention-days':1});
  expect(cleanup.if).toBe("always() && github.event_name == 'push' && github.ref == 'refs/heads/main'");expect(cleanup.run).toBe('node scripts/ci/main-ci-decision.mjs --cleanup');
 });
+describe('shadow mode observes without blocking main',()=>{
+ const shadow=async(f:ReturnType<typeof fixture>)=>{const configuration=(await f.github.rest.actions.listRepoVariables()).data;
+  configuration.variables.find(value=>value.name==='MATRIX_CI_DEDICATED_ENABLED')!.value='false';configuration.variables.find(value=>value.name==='MATRIX_CI_DEDICATED_SHADOW')!.value='true';
+  f.github.rest.actions.listRepoVariables.mockResolvedValue({data:configuration});};
+ // Only the controller run's receipt artifacts disappear; the requesting run's coverage decision stays.
+ const dropLinuxReceipt=(f:ReturnType<typeof fixture>)=>{const original=f.github.rest.actions.listWorkflowRunArtifacts.getMockImplementation()!;
+  f.github.rest.actions.listWorkflowRunArtifacts.mockImplementation(async(args:any)=>args.run_id===321?original(args):{data:{total_count:0,artifacts:[]}} as any);};
+ it('settles neutral when hosted CI passed but the shadow Linux receipt is missing',async()=>{
+  const f=fixture();await shadow(f);dropLinuxReceipt(f);
+  await reconcile(f);expect(written(f)).toMatchObject({name:"CI Source Qualification",head_sha:source,conclusion:"neutral"});
+  expect(JSON.parse(written(f).output.summary)).toMatchObject({shadowUnverified:true,qualificationMode:'shadow',requestingRunId:321});
+ });
+ it('stays neutral on a second reconciliation after the hosted decision artifact expires',async()=>{
+  const f=fixture();await shadow(f);dropLinuxReceipt(f);const history=retainAppHistory(f);
+  await reconcile(f);expect(history.current().conclusion).toBe('neutral');const proof=JSON.parse(history.current().output.summary).coverageProof;
+  expect(proof).toMatchObject({schemaVersion:1,origin:'main-ci-decision-artifact-v1',qualified:true});
+  f.github.rest.actions.listWorkflowRunArtifacts.mockImplementation(async()=>({data:{total_count:0,artifacts:[]}}) as any);
+  await reconcile(f);expect(history.current().conclusion).toBe('neutral');expect(JSON.parse(history.current().output.summary)).toMatchObject({shadowUnverified:true,coverageProof:proof});
+ });
+ it('fails instead of neutral when a newer hosted attempt starts during the Linux wait',async()=>{
+  const f=fixture();await shadow(f);dropLinuxReceipt(f);const original=f.github.rest.actions.listWorkflowRuns.getMockImplementation()!;let requesterLookups=0;
+  f.github.rest.actions.listWorkflowRuns.mockImplementation(async(args:any)=>args.workflow_id===98&&++requesterLookups>1?{data:{workflow_runs:[{...f.ci,run_attempt:2,status:'queued'}]}}:original(args));
+  await reconcile(f);expect(requesterLookups).toBeGreaterThan(1);expect(written(f)).toMatchObject({conclusion:'failure'});
+ });
+ it.each(['requester-pending','main-moved'])('still fails in shadow mode when %s',async kind=>{
+  const f=fixture();await shadow(f);dropLinuxReceipt(f);
+  if(kind==='requester-pending')f.ci.status='in_progress';
+  if(kind==='main-moved'){const original=f.github.rest.actions.listWorkflowRunArtifacts.getMockImplementation()!;f.github.rest.actions.listWorkflowRunArtifacts.mockImplementation(async args=>{f.github.rest.repos.getBranch.mockImplementation(async(a:any)=>({data:{name:a.branch,commit:{sha:base}}}));return original(args);});}
+  await reconcile(f);expect(written(f)).toMatchObject({conclusion:'failure'});
+ });
+});
