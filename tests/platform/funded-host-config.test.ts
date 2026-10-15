@@ -239,12 +239,17 @@ describe("funded host configuration", () => {
     await db.executor.updateTable("ai_funded_runtime_policies").set({ expires_at: "2026-10-08T12:00:10.000Z" }).execute();
     expect((await (await request()).json()).expiresAt).toBe("2026-10-08T12:00:10.000Z");
   });
-  it("permits the canonical GLM Chat policy while rejecting stale aliases", async () => {
-    for (const model of ["@cf/zai-org/glm-5.3-flash", "z-ai/glm-5.3-flash"]) {
-      await db.executor.updateTable("ai_funded_runtime_policies").set({ allowed_model_ids: JSON.stringify([model]) }).execute();
-      await db.executor.updateTable("ai_funded_global_policy").set({ allowed_model_ids: JSON.stringify([model]) }).execute();
-      expect((await request()).status).toBe(model.startsWith("@cf/") ? 200 : 503);
-    }
+  it.each([
+    ["@cf/zai-org/glm-5.3-flash", 200],
+    ["@cf/qwen/qwen3.8-27b", 200],
+    ["z-ai/glm-5.3-flash", 503],
+    ["@cf/unreviewed/model", 503],
+  ])("applies exact model policy to configuration and epoch bootstrap: %s", async (model, status) => {
+    await db.executor.updateTable("ai_funded_runtime_policies").set({ allowed_model_ids: JSON.stringify([model]) }).execute();
+    await db.executor.updateTable("ai_funded_global_policy").set({ allowed_model_ids: JSON.stringify([model]) }).execute();
+    expect((await request()).status).toBe(status);
+    expect((await epochRequest()).status).toBe(status);
+    expect(await db.executor.selectFrom("ai_funded_credit_ledger").selectAll().execute()).toEqual([]);
   });
   it("rejects unsafe injected config and freezes its registered cohort", async () => {
     const config = loadFundedHostConfig(env, new Date(now));
