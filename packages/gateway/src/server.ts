@@ -1,11 +1,14 @@
 import { createRuntimeProviderSettings, executableChatDrivers } from "./server/provider-discovery-composition.js";
 import { composePhaseCatalog } from "./chat/phase-catalog-composition.js";
 import { createCanonicalPhaseDiscovery } from "./server/canonical-phase-discovery.js";
+import { codexNativeEnvironment } from "./ai-providers/codex-native-environment.js";
+import { createNativeCodexRuntime } from "./server/native-codex-runtime.js";
 import { registerAppIntegrationCapabilities, registerAppAiCapabilities, createAppAiSubscriptionObservation, closeAppAiCapabilities } from "./server/app-capabilities.js";
 import { withMatrixAnthropicProviderInstances } from "./bots/matrix-anthropic-provider-instance.js";
 import { createMatrixAnthropicRuntime } from "./server/matrix-anthropic-runtime.js";
 import { withChatGptPlanProviderInstance } from "./bots/chatgpt-plan-provider-instance.js";
 import { createNativeProviderWorkflowRuntime } from "./server/native-provider-workflow-runtime.js";
+import { buildAgentRuntimeEnvironment as buildSettingsAccountEnvironment } from "./agent-launcher.js";
 import { createNativeProviderProfileGuard } from "./ai-providers/native-provider-profile-guard.js";
 import { createChatDriveProjectRoutes } from "./chat/drive-projects.js";
 import { createProductionChatDriveContext } from "./chat/drive-context-production.js";
@@ -547,6 +550,13 @@ export async function createGateway(config: GatewayConfig) {
   const codingAgentProviders: CodingAgentProviderAdapter[] = [];
   const codingAgentRegistryProviders: CodingAgentProviderAdapter[] = [];
   let providerSettingsStore: ProviderSettingsStore | undefined;
+  const nativeCodexRuntime = createNativeCodexRuntime({
+    homePath, executable: codexExecutable, ownerIds: terminalRuntimeOwnerIds,
+    environment: () => codexNativeEnvironment(homePath, buildSettingsAccountEnvironment(homePath), process.env.CODEX_HOME),
+    profileGuard: nativeProviderProfileGuard,
+    getSettings: () => providerSettingsStore,
+    getRuntime: () => codingAgentWorkspaceRuntime,
+  });
   // S08: the owner's Provider V3 snapshot reader is built after the owner database, so the
   // collaboration runtime receives a lazy reader; it is only consulted at policy writes and
   // run admission, never during construction, and reads fail closed until the service exists.
@@ -559,8 +569,28 @@ export async function createGateway(config: GatewayConfig) {
   };
   const backgroundAgentRuntime = createBackgroundAgentRuntime({ homePath });
   const backgroundChatProjection = createBackgroundChatProjection();
+  // Public workspace sessions and coding-agent threads share native admission,
+  // runtime ownership and the single shutdown path, even without installed agents.
+  const codingAgentSessionManager = createAgentSessionManager({
+    homePath,
+    worktreeManager: codingAgentWorktreeManager,
+    agentLauncher: agentCredentialLauncher,
+    resolveNativeCodexSubscription: nativeCodexRuntime.resolveSubscription,
+    beforeProjectSessionRemove: nativeCodexRuntime.beforeProjectSessionRemove,
+    terminalRuntime: terminalWorkspaceRuntime,
+    backgroundRuntime: backgroundAgentRuntime,
+  });
+  codingAgentWorkspaceRuntime = createWorkspaceSessionOrchestrator({
+    homePath,
+    projectManager: codingAgentProjectManager,
+    worktreeManager: codingAgentWorktreeManager,
+    agentSessionManager: codingAgentSessionManager,
+    onClose: () => codingAgentSessionManager.shutdown(),
+    agentSandbox: createAgentSandbox({ homePath }),
+    sessionRuntimeBridge: workspaceSessionRuntimeBridge,
+    eventPublisher: workspaceEventPublisher,
+  });
   if (codingAgentWorkspaceAgents.length > 0) {
-    const codingAgentProjectManager = createProjectManager({ homePath });
     codexEventBridge = codexExecutable
       ? createCodexEventBridge({
         homePath,
@@ -573,28 +603,12 @@ export async function createGateway(config: GatewayConfig) {
         },
       })
       : undefined;
-    const codingAgentSessionManager = createAgentSessionManager({
-      homePath,
-      worktreeManager: codingAgentWorktreeManager,
-      agentLauncher: agentCredentialLauncher,
-      terminalRuntime: terminalWorkspaceRuntime,
-      backgroundRuntime: backgroundAgentRuntime,
-    });
-    codingAgentWorkspaceRuntime = createWorkspaceSessionOrchestrator({
-      homePath,
-      projectManager: codingAgentProjectManager,
-      worktreeManager: codingAgentWorktreeManager,
-      agentSessionManager: codingAgentSessionManager,
-      onClose: () => codingAgentSessionManager.shutdown(),
-      agentSandbox: createAgentSandbox({ homePath }),
-      sessionRuntimeBridge: workspaceSessionRuntimeBridge,
-      eventPublisher: workspaceEventPublisher,
-    });
     const providerSet = createWorkspaceCodingAgentProviderSet({
       agents: codingAgentWorkspaceAgents,
       runtime: codingAgentWorkspaceRuntime,
       homePath,
       codexEvents: codexEventBridge,
+      codexAdmission: nativeCodexRuntime.admission,
       codexControl: codexExecutable ? createCodexControlClient({ homePath }) : undefined,
       pi: {
         resolveCredentialLaunch: createCodingHarnessCredentialResolver({
@@ -1489,11 +1503,12 @@ export async function createGateway(config: GatewayConfig) {
   });
   collaborationProviderSnapshots.attach(aiProviderService);
   const providerLoginCoordinator = createProviderTerminalLoginCoordinator({
+    codexExecutable: codexExecutable ?? undefined,
     profileGuard: nativeProviderProfileGuard,
     homePath,
     registry: providerLoginTerminalRegistry,
     enabledHarnesses: codingAgentWorkspaceAgents.filter(
-      (agent): agent is "claude" => agent === "claude",
+      (agent): agent is "claude" | "codex" => agent === "claude" || agent === "codex",
     ),
   });
   const providerAccountLifecycle = createDefaultProviderCliAccountLifecycleCoordinator({
@@ -1514,6 +1529,8 @@ export async function createGateway(config: GatewayConfig) {
     codexExecutable,
     observationScope: canonicalPhaseDiscovery.observationScope,
     homePath,
+    codexNativeAccountMetadataReader: nativeCodexRuntime.readAccount,
+    prepareNativeCodexRevocation: () => nativeCodexRuntime.admission.prepareRevocation(),
     providerSnapshotReader: aiProviderService,
     loginCoordinator: providerLoginCoordinator,
     accountLifecycle: providerAccountLifecycle,
@@ -1710,6 +1727,10 @@ export async function createGateway(config: GatewayConfig) {
     ? createProjectChatCleanup({ repository: chatRepository, orchestrator: canonicalChatOrchestrator })
     : async () => { throw new Error("Project chat cleanup unavailable"); };
   app.route("/", createWorkspaceRoutes({
+    agentSessionManager: codingAgentSessionManager,
+    sessionOrchestrator: codingAgentWorkspaceRuntime,
+    startSession: nativeCodexRuntime.startSession,
+    beforeProjectSessionRemove: nativeCodexRuntime.beforeProjectSessionRemove,
     homePath,
     backgroundRuntime: backgroundAgentRuntime,
     terminalRuntime: terminalWorkspaceRuntime,
@@ -1728,6 +1749,7 @@ export async function createGateway(config: GatewayConfig) {
   }));
   app.route("/api", createShellRoutes(shellRouteDeps));
   const workspaceStartupRecoveryController = createWorkspaceStartupRecovery({
+    beforeProjectSessionRemove: nativeCodexRuntime.beforeProjectSessionRemove,
     deleteProjectChats,
     homePath,
     backgroundRuntime: backgroundAgentRuntime,
