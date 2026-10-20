@@ -4,12 +4,14 @@ import { AppError } from "../../desktop/src/shared/app-error";
 import { createLegacyGlobalProviderCatalog } from "../../desktop/src/renderer/src/features/chat/canonical-composer-adapter";
 import {
   DEFAULT_ONBOARDING_PREFS,
+  onboardingActiveAi,
+  onboardingAiForInstance,
   onboardingLoginPresentation,
   onboardingPrefsKey,
   onboardingSessionInit,
   readOnboardingPrefs,
   writeOnboardingPrefs,
-} from "../../desktop/src/renderer/src/features/onboarding-widget/onboarding-widget-prefs";
+} from "@matrix-os/ui";
 import {
   admitOnboardingTurn,
   isComputerStartingError,
@@ -107,6 +109,39 @@ describe("onboarding AI selection", () => {
 
     const codexReady = catalogWith((instance) => instance.driverKind === "codex" ? { ...instance, availability: "available" } : instance);
     expect(onboardingConnectedProviders(codexReady)).toEqual(["codex"]);
+  });
+
+  function harness(id: string, driverKind: string, availability: "available" | "unavailable" = "available") {
+    const hermes = createLegacyGlobalProviderCatalog({ hasProject: false }).instances.find((instance) => instance.id === "hermes_default")!;
+    return { ...hermes, id, driverKind, availability, defaultSelection: { instanceId: id, model: "provider-default" } } as CanonicalProviderCatalog["instances"][number];
+  }
+  const catalogOf = (...instances: CanonicalProviderCatalog["instances"]): CanonicalProviderCatalog =>
+    ({ ...createLegacyGlobalProviderCatalog({ hasProject: false }), instances });
+  const hermesOff = harness("hermes_default", "hermes", "unavailable");
+  const claude = harness("claude_code_default", "claude_code");
+
+  it("names the AI a chat's provider instance belongs to, or nothing for one the widget does not offer", () => {
+    const catalog = catalogOf(hermesOff, claude, harness("codex_default", "codex"), harness("pi_default", "pi"));
+    expect(onboardingAiForInstance(catalog, "hermes_default")).toBe("matrix");
+    expect(onboardingAiForInstance(catalog, "matrix_pi_default")).toBe("matrix");
+    expect(onboardingAiForInstance(catalog, "claude_code_default")).toBe("claude");
+    expect(onboardingAiForInstance(catalog, "codex_default")).toBe("codex");
+    expect(onboardingAiForInstance(catalog, "pi_default")).toBeNull();
+    expect(onboardingAiForInstance(catalog, "gone_instance")).toBeNull();
+  });
+
+  it("runs Matrix AI only on Hermes or the managed Matrix route, never on whatever else is the default", () => {
+    expect(onboardingSelection(catalogOf(hermesOff, claude), "matrix")).toBeNull();
+    expect(onboardingSelection(catalogOf(hermesOff, harness("matrix_pi_default", "matrix_pi"), claude), "matrix")?.instanceId).toBe("matrix_pi_default");
+    expect(onboardingSelection(catalogOf(hermesOff, claude), "claude")?.instanceId).toBe("claude_code_default");
+    expect(onboardingSelection(catalogOf(hermesOff, harness("claude_code_default", "claude_code", "unavailable")), "claude")).toBeNull();
+  });
+
+  it("names the AI a task really runs on, and keeps the saved choice for when Matrix AI can run again", () => {
+    expect(onboardingActiveAi(catalogOf(hermesOff, claude), "matrix")).toBe("claude");
+    expect(onboardingActiveAi(catalogOf(hermesOff), "matrix")).toBe("matrix");
+    expect(onboardingActiveAi(createLegacyGlobalProviderCatalog({ hasProject: false }), "matrix")).toBe("matrix");
+    expect(onboardingActiveAi(catalogOf(hermesOff, claude), "codex")).toBe("codex");
   });
 
   it("reports exhausted credits only for the selected instance", () => {
@@ -253,6 +288,54 @@ describe("onboarding turn admission", () => {
     await admitOnboardingTurn({ client: client as never, chatId: "chat_old", prompt: "Again", selection, requestIds });
     expect(client.create).not.toHaveBeenCalled();
     expect(client.admitTurn).toHaveBeenCalledWith("chat_old", expect.objectContaining({ baseRevision: 9 }), { chatScope: "global" });
+  });
+
+  // The widget would now pick Hermes with full access; the chat ran on Claude, supervised.
+  const fullAccess = { ...selection, permissionMode: "full_access" };
+  const claude = { instanceId: "claude_default", model: "claude-sonnet", options: [{ id: "effort", value: "high" }] };
+  const run = (id: string, createdAt: string, permissionMode: string) => ({
+    id, instanceId: "claude_default", selection: claude, interactionMode: "default", permissionMode, createdAt,
+  });
+  const boundDetail = (runs: unknown[]) => ({
+    record: { chat: { revision: 4, currentSelection: claude }, providerBinding: { instanceId: "claude_default" } },
+    runs,
+  });
+
+  it("keeps a follow-up on the AI and permission mode its chat last ran with, even after the widget's choice changes", async () => {
+    const client = {
+      create: vi.fn(),
+      getDetail: vi.fn().mockResolvedValue(boundDetail([
+        run("run_old", "2026-10-19T10:00:00.000Z", "auto_accept_edits"),
+        run("run_last", "2026-10-19T11:00:00.000Z", "supervised"),
+      ])),
+      admitTurn: vi.fn().mockResolvedValue(admitted("chat_old")),
+    };
+    await admitOnboardingTurn({ client: client as never, chatId: "chat_old", prompt: "Follow up", selection: fullAccess, requestIds });
+    expect(client.create).not.toHaveBeenCalled();
+    expect(client.admitTurn).toHaveBeenCalledWith("chat_old", expect.objectContaining({
+      baseRevision: 4, selection: claude, interactionMode: "default", permissionMode: "supervised",
+    }), { chatScope: "global" });
+  });
+
+  it("starts a new chat instead of guessing permissions for a bound chat that never ran", async () => {
+    const client = {
+      create: vi.fn().mockResolvedValue({ chat: { id: "chat_new", revision: 1 } }),
+      getDetail: vi.fn().mockResolvedValue(boundDetail([])),
+      admitTurn: vi.fn().mockResolvedValue(admitted("chat_new")),
+    };
+    await admitOnboardingTurn({ client: client as never, chatId: "chat_old", prompt: "Try again", selection, requestIds });
+    expect(client.create).toHaveBeenCalledWith(expect.objectContaining({ clientRequestId: "req_create_1", currentSelection: { instanceId: "hermes_default", model: "default" } }));
+    expect(client.admitTurn).toHaveBeenCalledWith("chat_new", expect.objectContaining({ selection: { instanceId: "hermes_default", model: "default" }, permissionMode: "default" }), { chatScope: "global" });
+  });
+
+  it("uses the widget's choice for a chat that is not bound yet", async () => {
+    const client = {
+      create: vi.fn(),
+      getDetail: vi.fn().mockResolvedValue({ record: { chat: { revision: 5, currentSelection: claude } }, runs: [] }),
+      admitTurn: vi.fn().mockResolvedValue(admitted("chat_old")),
+    };
+    await admitOnboardingTurn({ client: client as never, chatId: "chat_old", prompt: "Unbound", selection, requestIds });
+    expect(client.admitTurn).toHaveBeenLastCalledWith("chat_old", expect.objectContaining({ selection: { instanceId: "hermes_default", model: "default" }, permissionMode: "default" }), { chatScope: "global" });
   });
 
   it("starts a new chat when the remembered one is gone, but surfaces other failures", async () => {

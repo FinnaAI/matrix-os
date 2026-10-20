@@ -1,17 +1,19 @@
 // @vitest-environment jsdom
 
 import { act, cleanup, renderHook } from "@testing-library/react";
-import { useReducer } from "react";
+import { useMemo, useReducer } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   initialOnboardingWidgetState,
   reduceOnboardingWidget,
+  type OnboardingWidgetEvent,
   type OnboardingWidgetInit,
 } from "@matrix-os/contracts";
+import { useOnboardingAiConnect, useOnboardingRun } from "@matrix-os/ui";
 import { AppError } from "@desktop/shared/app-error";
 import type { ApiClient } from "@desktop/renderer/src/lib/api";
-import { useOnboardingRun } from "@desktop/renderer/src/features/onboarding-widget/use-onboarding-run";
-import { useOnboardingAiConnect } from "@desktop/renderer/src/features/onboarding-widget/use-onboarding-ai-connect";
+import { createDesktopOnboardingChatPort } from "@desktop/renderer/src/features/onboarding-widget/onboarding-widget-runner";
+import { useDesktopOnboardingAiPort } from "@desktop/renderer/src/features/onboarding-widget/use-onboarding-ai-connect";
 import { useOnboardingAppConnect } from "@desktop/renderer/src/features/onboarding-widget/use-onboarding-app-connect";
 import { useIntegrations } from "@desktop/renderer/src/features/integrations/integrations-store";
 
@@ -39,10 +41,15 @@ vi.mock("@desktop/renderer/src/features/settings/provider-workflow-transport", (
 const selection = { instanceId: "hermes_default", model: "default", options: [], interactionMode: "default", permissionMode: "default" } as never;
 const api = { openStream: vi.fn() } as unknown as ApiClient;
 
-function useHarness(init: OnboardingWidgetInit, client: unknown) {
+function useHarness(init: OnboardingWidgetInit, client: unknown, onRunInstance?: (instanceId: string | null) => void) {
   const [state, dispatch] = useReducer(reduceOnboardingWidget, init, initialOnboardingWidgetState);
-  const runView = useOnboardingRun(state, dispatch, { api, client: client as never, selection, selectionPending: false });
+  const port = useMemo(() => createDesktopOnboardingChatPort(api, client as never), [client]);
+  const runView = useOnboardingRun(state, dispatch, { port, selection, selectionPending: false, ...(onRunInstance ? { onRunInstance } : {}) });
   return { state, dispatch, runView };
+}
+
+function useDesktopAiConnect(dispatch: (event: OnboardingWidgetEvent) => void) {
+  return useOnboardingAiConnect(useDesktopOnboardingAiPort(api), dispatch);
 }
 
 async function flush(ms = 0) {
@@ -105,6 +112,18 @@ describe("onboarding run recovery", () => {
     expect(result.current.state.screen).toMatchObject({ phase: "done" });
     expect(result.current.state.firstTaskCompleted).toBe(true);
     expect(client.admitTurn).not.toHaveBeenCalled();
+  });
+
+  it("reports which AI the watched run used, so its follow-up can name the chat's AI", async () => {
+    const onRunInstance = vi.fn();
+    const client = {
+      create: vi.fn(),
+      admitTurn: vi.fn(),
+      getDetail: vi.fn().mockResolvedValue({ runs: [{ id: "run_1", status: "completed", instanceId: "claude_code_default" }], messages: [] }),
+    };
+    renderHook(() => useHarness({ size: "corner", firstTaskCompleted: false, chatId: "chat_1", pendingRun }, client, onRunInstance));
+    await flush();
+    expect(onRunInstance).toHaveBeenCalledWith("claude_code_default");
   });
 
   it("fails a restored run that the chat no longer has", async () => {
@@ -214,7 +233,7 @@ describe("onboarding AI sign-in", () => {
   it("switches the AI when a sign-in the user is still waiting on succeeds", async () => {
     workflow.client = signInClient();
     const dispatch = vi.fn();
-    const { result } = renderHook(() => useOnboardingAiConnect(api, dispatch));
+    const { result } = renderHook(() => useDesktopAiConnect(dispatch));
     act(() => result.current.startSignIn("claude"));
     await flush(2_000);
     expect(dispatch).toHaveBeenCalledWith({ type: "ai.connected", provider: "claude" });
@@ -224,7 +243,7 @@ describe("onboarding AI sign-in", () => {
     const client = signInClient();
     workflow.client = client;
     const dispatch = vi.fn();
-    const { result } = renderHook(() => useOnboardingAiConnect(api, dispatch));
+    const { result } = renderHook(() => useDesktopAiConnect(dispatch));
     act(() => result.current.startSignIn("claude"));
     await flush();
     act(() => result.current.abandonSignIn());
@@ -253,7 +272,7 @@ describe("onboarding AI sign-in", () => {
     const { client, save } = keyClient();
     workflow.client = client;
     const dispatch = vi.fn();
-    const { result } = renderHook(() => useOnboardingAiConnect(api, dispatch));
+    const { result } = renderHook(() => useDesktopAiConnect(dispatch));
     act(() => result.current.submitKey("claude", "sk-ant-test"));
     await flush();
     expect(client.submitConnectionKey).toHaveBeenCalledTimes(1);
@@ -266,7 +285,7 @@ describe("onboarding AI sign-in", () => {
     const { client, save } = keyClient();
     workflow.client = client;
     const dispatch = vi.fn();
-    const { result } = renderHook(() => useOnboardingAiConnect(api, dispatch));
+    const { result } = renderHook(() => useDesktopAiConnect(dispatch));
     act(() => result.current.submitKey("claude", "sk-ant-test"));
     await flush();
     act(() => result.current.abandonSignIn());

@@ -1,4 +1,5 @@
 import type {
+  OnboardingAiChoice,
   OnboardingAiProvider,
   OnboardingRunView,
   OnboardingWidgetEvent,
@@ -50,6 +51,11 @@ export interface OnboardingWidgetProps {
   apps: readonly OnboardingWidgetApp[];
   repos: readonly OnboardingWidgetRepo[] | null;
   runView: OnboardingRunView | null;
+  /** The AI a new task runs on; differs from `state.aiChoice` while Matrix AI can't run on this computer. */
+  activeAi: OnboardingAiChoice;
+  /** The AI a follow-up runs on: the one its chat already uses, which `activeAi` can no longer change. Null when unknown. */
+  followUpAi?: OnboardingAiChoice | null;
+  matrixAvailable: boolean;
   connectedProviders: readonly OnboardingAiProvider[];
   creditsExhausted: boolean;
   /** Device code to type on the provider's sign-in page, when the provider uses one. */
