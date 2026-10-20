@@ -1365,7 +1365,7 @@ export function Desktop({ launchAppPath, sharedTerminalScopeId, onOpenCommandPal
         </div>
       </div>
 
-      <DesktopOnboardingWidget chat={chat} openApp={openAppOrFocus} onOpenSettings={openWebSettings} />
+      <DesktopOnboardingWidget accountId={cacheScope?.userId ?? null} chat={chat} openApp={openAppOrFocus} onOpenSettings={openWebSettings} />
       <Settings
         open={settingsOpen}
         onOpenChange={setSettingsOpen}

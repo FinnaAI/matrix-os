@@ -1,4 +1,5 @@
 import {
+  isValidServiceId,
   parseAvailableIntegrations,
   parseConnectedIntegrations,
   parseConnectUrl,
@@ -190,6 +191,11 @@ export function useShellOnboardingIntegrations(
     if (appsUnavailableRef.current) {
       setConnectingService(null);
       dispatch({ type: "connect.unavailable", service: serviceId });
+      return;
+    }
+    if (!isValidServiceId(serviceId)) {
+      setConnectingService(null);
+      dispatch({ type: "connect.failed", service: serviceId });
       return;
     }
     // Opened synchronously inside the click so popup blockers allow it; the consent URL arrives later.

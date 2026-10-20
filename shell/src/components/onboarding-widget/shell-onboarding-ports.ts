@@ -1,10 +1,13 @@
 import {
   createSharedCanonicalChatEventSource,
+  type OnboardingAiConnectPort,
   type OnboardingChatPort,
   type OnboardingRepoSource,
 } from "@matrix-os/ui";
 import { z } from "zod/v4";
+import { PROVIDER_SETTINGS_CHANGED_EVENT } from "@/lib/canonical-provider-setup";
 import { CanonicalShellChatRequestError, type CanonicalShellChatClient } from "@/lib/canonical-chat-client";
+import { createWebProviderWorkflowClient, openWebProviderWorkflowAuthorization } from "@/lib/provider-workflow-transport";
 import { boundedProviderSettingsJson } from "@/lib/provider-settings-transport";
 
 const REQUEST_TIMEOUT_MS = 10_000;
@@ -49,6 +52,16 @@ export function createShellOnboardingChatPort(client: CanonicalShellChatClient):
 async function boundedJson(response: Response): Promise<unknown> {
   if (!response.ok) throw new Error(`OnboardingRepoRequestFailed:${response.status}`);
   return boundedProviderSettingsJson(response, MAX_REPO_RESPONSE_BYTES);
+}
+
+/** Bound to the computer the widget opened; in-app routes such as /shared must not move these requests. */
+export function createShellOnboardingAiPort(gatewayUrl: string, fetcher: typeof fetch = fetch): OnboardingAiConnectPort {
+  return {
+    client: createWebProviderWorkflowClient({ gatewayUrl, fetcher }),
+    openAuthorization: openWebProviderWorkflowAuthorization,
+    isIdentityCurrent: () => true,
+    onConnected: () => window.dispatchEvent(new Event(PROVIDER_SETTINGS_CHANGED_EVENT)),
+  };
 }
 
 export function createShellOnboardingRepoSource(gatewayUrl: string, fetchFn: typeof fetch = fetch): OnboardingRepoSource {
