@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# Test host only. Run from the exact reviewed PR source as root with pr-<N>.
+# Test host only. Private previews additionally require their machine and owner IDs.
 LAB_SOURCE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LAB_PREFIX=/opt/matrix-browser-lab
 LAB_NODE=/opt/matrix/runtime/node/bin/node
-if [ "$(id -u)" != 0 ] || [ $# != 1 ]; then
-  echo 'Usage: sudo ./install.sh pr-<number>' >&2
+if [ "$(id -u)" != 0 ] || { [ $# != 1 ] && [ $# != 3 ]; }; then
+  echo 'Usage: sudo ./install.sh preview [machine-id owner-id]' >&2
   exit 64
 fi
-/usr/bin/python3 -I "$LAB_SOURCE/native-experience.py" guard "$1"
+/usr/bin/python3 -I "$LAB_SOURCE/native-experience.py" guard "$@"
 . /etc/os-release
 if [ "$ID" != ubuntu ] || [ "$VERSION_ID" != 24.04 ] || [ "$(uname -m)" != x86_64 ]; then
   echo 'This pinned lab installer requires Ubuntu 24.04 x86_64' >&2
@@ -39,7 +39,8 @@ python3 -m venv "$LAB_PREFIX/venv"
 "$LAB_PREFIX/venv/bin/pip" install --disable-pip-version-check 'browser-use==0.13.11'
 # Executables remain root-owned; browser/worker profiles belong to the VPS owner.
 tar -C "$LAB_SOURCE" --exclude=node_modules --exclude=.venv -cf - . | tar -C "$LAB_PREFIX/app" -xf -
-chown -R root:root "$LAB_PREFIX"
+chown -R root:root "$LAB_PREFIX/app" "$LAB_PREFIX/bin" "$LAB_PREFIX/venv"
+chmod 0755 "$LAB_PREFIX/app"
 install -d -o matrix -g matrix -m 0700 /home/matrix/.local/share/matrix-browser-lab/chrome
 install -d -m 0755 /etc/opt/chrome/policies/managed
 cat > /etc/opt/chrome/policies/managed/matrix-browser-lab.json <<'JSON'
@@ -47,6 +48,9 @@ cat > /etc/opt/chrome/policies/managed/matrix-browser-lab.json <<'JSON'
 JSON
 # Random stream credential stays server-side; arbitrary pages in Chrome cannot
 # connect directly to the loopback desktop viewer without authentication.
+# A retry after service installation failed must retain the existing viewer
+# credential pair, just as it retains the Chrome profile.
+if [ ! -f "$LAB_PREFIX/viewer.passwd" ] || ! grep -Eq '^MATRIX_BROWSER_LAB_VIEWER_AUTH="?Basic [A-Za-z0-9+/]+={0,2}"?$' /opt/matrix/env/host.env; then
 python3 - <<'AUTH'
 import base64, os, secrets, subprocess
 from pathlib import Path
@@ -61,6 +65,7 @@ auth = 'Basic ' + base64.b64encode(f'matrix-browser-lab:{password}'.encode()).de
 subprocess.run(['/opt/matrix/runtime/node/bin/node', '/opt/matrix-browser-lab/app/viewer-auth.mjs'],
     input=auth, text=True, check=True, capture_output=True, timeout=10)
 AUTH
+fi
 cat > /etc/systemd/system/matrix-browser-lab-vnc.service <<'UNIT'
 [Unit]
 Description=Matrix test browser full-window viewer (loopback only)
@@ -94,7 +99,7 @@ NoNewPrivileges=true
 [Install]
 WantedBy=multi-user.target
 UNIT
-/usr/bin/python3 -I "$LAB_SOURCE/native-experience.py" install "$1"
+/usr/bin/python3 -I "$LAB_SOURCE/native-experience.py" install "$@"
 cat > /etc/systemd/system/matrix-browser-lab.service <<'UNIT'
 [Unit]
 Description=Matrix test browser automation supervisor
