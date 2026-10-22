@@ -5,6 +5,7 @@ import { useConnection } from "../../stores/connection";
 import { useUi } from "../../stores/ui";
 import { readNativeEmbedBounds } from "./embed-bounds";
 import { nativeBrowserProduct } from "../../../../shared/browser-products";
+import { DesktopAppSiteButton } from "../app-sites/DesktopAppSiteButton";
 
 // Hosts a main-process WebContentsView positioned over this element's rect.
 // The remote content renders in an isolated partition with no IPC access.
@@ -13,6 +14,7 @@ import { nativeBrowserProduct } from "../../../../shared/browser-products";
 // (embed:set-active false) rather than moved off-screen (lesson L14).
 interface EmbedHostCommonProps {
   active?: boolean;
+  visible?: boolean;
   refreshRequest?: number;
   layoutRevision?: string;
   visualScale?: number;
@@ -31,6 +33,7 @@ export default function EmbedHost({
   const {
     kind,
   active: requestedActive = true,
+  visible = requestedActive,
   refreshRequest,
   layoutRevision,
   visualScale = 1,
@@ -198,6 +201,8 @@ export default function EmbedHost({
   }, [active, openedEmbedRevision, refreshRequest]);
 
   return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      {slug && visible ? <div className="flex shrink-0 justify-end border-b px-3 py-1.5"><DesktopAppSiteButton key={slug} appSlug={slug} /></div> : null}
     <div ref={hostRef} className="ph-no-capture relative min-h-0 flex-1" style={{ background: "var(--bg-app)" }}>
       {snapshotDataUrl ? (
         <img
@@ -259,6 +264,7 @@ export default function EmbedHost({
           </Button>
         </div>
       ) : null}
+    </div>
     </div>
   );
 }
