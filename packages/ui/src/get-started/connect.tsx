@@ -88,7 +88,7 @@ export function ServiceConnectAction({ service, label, connect, text = "Connect"
   text?: string;
 }) {
   if (connect.connectedServices.has(service)) {
-    return <span className="mxo-connected"><span className="mxo-dot mxo-dot--working" aria-hidden />Connected</span>;
+    return <span className="mxo-connected"><span className="mxo-dot mxo-dot--on" aria-hidden />Connected</span>;
   }
   if (connect.connectingService === service) {
     return <span className="mxo-muted"><Icon icon={Loading03Icon} size={14} className="mxo-spin" /> Waiting for {label} sign-in…</span>;
@@ -137,6 +137,7 @@ export function GetStartedConnectTools({ goals, connect }: { goals: readonly Get
         failedIds={failedIds}
         leadingSection={leadingSection}
         lockWhileConnecting={false}
+        addAccounts={false}
         onConnect={connect.connect}
       />
     </section>

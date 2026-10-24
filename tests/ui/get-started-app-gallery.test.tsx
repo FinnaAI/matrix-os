@@ -99,7 +99,8 @@ describe("Apps ready with your data", () => {
     expect(rows[0]!.querySelector("img")).toHaveAttribute("src", "https://example.test/icons/gallery-atlas.png");
     expect(within(rows[0]!).getByText("Uses Gmail and Google Calendar")).toBeInTheDocument();
     // Building your own stays one click away.
-    expect(screen.getByText("Or build your own")).toBeInTheDocument();
+    expect(screen.getByText("Or build your first app")).toBeInTheDocument();
+    expect(screen.getByText("Pick one and Matrix starts building it in Chat as soon as your AI is ready.")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Habit tracker/ })).toBeInTheDocument();
   });
 
@@ -108,7 +109,7 @@ describe("Apps ready with your data", () => {
     setup({}, { gallery, services: ["gmail"] });
     fireEvent.click(await screen.findByRole("button", { name: "Add Folio" }));
     expect(gallery.install).toHaveBeenCalledWith("folio");
-    expect(await screen.findByRole("button", { name: "Folio added" })).toBeDisabled();
+    expect(await screen.findByText("Added")).toHaveClass("mxo-connected");
   });
 
   it("keeps the owner on the step while an app is being added, so a failure is never missed", async () => {
@@ -126,7 +127,9 @@ describe("Apps ready with your data", () => {
 
   it("shows apps already installed as added", async () => {
     setup({}, { gallery: galleryPort([app("folio", "Folio", [{ id: "gmail", name: "Gmail" }], true)]), services: ["gmail"] });
-    expect(await screen.findByRole("button", { name: "Folio added" })).toBeDisabled();
+    // Done reads like a connected app: a green Added, not a greyed-out button.
+    expect(await screen.findByText("Added")).toHaveClass("mxo-connected");
+    expect(screen.queryByRole("button", { name: /Folio/ })).not.toBeInTheDocument();
   });
 
   it("falls back to building your own when nothing connected makes an app ready", async () => {
