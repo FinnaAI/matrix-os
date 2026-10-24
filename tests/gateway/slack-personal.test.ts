@@ -32,6 +32,12 @@ describe("durable private Slack personal transport",()=>{
   expect(sendReply).toHaveBeenCalledTimes(1);expect(sendReply.mock.calls[0][0]).toMatchObject({envelope,chatId:"chat_private",runId:"run_private",text:"Private <@U123> & <!channel>"});
   await service.receive({...envelope,event:{...envelope.event,eventId:"Ev456"}});await service.drain();expect(resolvePersonalChat).toHaveBeenCalledTimes(1);
  });
+ it("safely truncates a personal reply without replacing half an emoji",async()=>{
+  service=new SlackPersonalService({db,ownerId:envelope.ownerId,now:()=>now,resolvePersonalChat,submitPersonal,sendReply,
+   readResult:async()=>({status:"completed",requestingActorId:envelope.ownerId,runId:"run_private",text:"a".repeat(11999)+"😀 tail"})});
+  await service.receive(envelope);await service.drain();
+  expect(sendReply).toHaveBeenCalledOnce();expect(sendReply.mock.calls[0][0].text).toBe("a".repeat(11999));
+ });
  it("refuses channels, company flags, changed identities and substituted event payloads",async()=>{
   for(const bad of [{...envelope,actorId:"user_other"},{...envelope,channelScopeId:"10000000-0000-4000-8000-000000000001"},{...envelope,companyPublicationApproved:true},{...envelope,event:{...envelope.event,channelId:"C123"}},{...envelope,event:{...envelope.event,channelId:"G123"}},{...envelope,event:{...envelope.event,kind:"mention"}}]) await expect(service.receive(bad)).rejects.toMatchObject({code:"forbidden"});
   await service.receive(envelope);await expect(service.receive({...envelope,event:{...envelope.event,text:"Replace payload"}})).rejects.toMatchObject({code:"conflict"});expect(submitPersonal).not.toHaveBeenCalled();
@@ -39,6 +45,21 @@ describe("durable private Slack personal transport",()=>{
  it("never automatically repeats an ambiguous send",async()=>{
   await service.receive(envelope);await service.drain();completed=true;sendReply.mockResolvedValueOnce({status:"uncertain"});await service.drain();await service.drain();expect(sendReply).toHaveBeenCalledTimes(1);
   expect((await db.selectFrom("slack_personal_outbox").select("state").executeTakeFirstOrThrow()).state).toBe("uncertain");
+ });
+ it("delivers a fixed failure notice once for the accepted run, including across restart",async()=>{
+  const readResult=vi.fn(async()=>({status:"failed" as const,requestingActorId:envelope.ownerId,runId:"run_private",text:"private raw provider failure"}));
+  const createFailed=()=>new SlackPersonalService({db,ownerId:envelope.ownerId,now:()=>now,resolvePersonalChat,submitPersonal,sendReply,readResult});
+  service=createFailed();await service.receive(envelope);await service.drain();await service.close();service=createFailed();await service.drain();
+  expect(sendReply).toHaveBeenCalledTimes(1);
+  expect(sendReply).toHaveBeenCalledWith(expect.objectContaining({runId:"run_private",text:"I couldn’t finish your request. Please try again. If this keeps happening, check Agents & providers in Matrix."}));
+  expect((await db.selectFrom("slack_personal_outbox").select("state").executeTakeFirstOrThrow()).state).toBe("sent");
+ });
+ it("revalidates the failed run before sending its fixed failure notice",async()=>{
+  const readResult=vi.fn().mockResolvedValueOnce({status:"failed",requestingActorId:envelope.ownerId,runId:"run_private"})
+   .mockResolvedValueOnce({status:"failed",requestingActorId:"user_other",runId:"run_private"});
+  service=new SlackPersonalService({db,ownerId:envelope.ownerId,now:()=>now,resolvePersonalChat,submitPersonal,sendReply,readResult});
+  await service.receive(envelope);await service.drain();expect(sendReply).not.toHaveBeenCalled();
+  expect((await db.selectFrom("slack_personal_outbox").select("state").executeTakeFirstOrThrow()).state).toBe("failed");
  });
  it("rejects a canonical result belonging to another actor or accepted run",async()=>{
   service=new SlackPersonalService({db,ownerId:envelope.ownerId,now:()=>now,resolvePersonalChat,submitPersonal,sendReply,readResult:async()=>({status:"completed",requestingActorId:"user_other",runId:"run_other",text:"Wrong private data"})});
