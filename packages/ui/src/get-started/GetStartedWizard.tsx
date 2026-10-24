@@ -12,11 +12,13 @@ import {
   type GetStartedWizardState,
   type GetStartedWizardStep,
 } from "@matrix-os/contracts";
+import { galleryAppsReadyWith } from "@matrix-os/contracts/app-gallery";
 import { useEffect, useId, useMemo, useRef, type KeyboardEvent, type ReactNode } from "react";
 import { ButtonRow, RabbitAvatar, ToggleChip } from "../onboarding-widget/parts.js";
 import { GetStartedAiStep } from "./ai-step.js";
-import { GetStartedAppGalleryStep } from "./app-gallery-step.js";
-import { GetStartedConnectList, type GetStartedConnect } from "./connect.js";
+import { GetStartedAppGalleryStep, type GetStartedReadyApp } from "./app-gallery-step.js";
+import { GetStartedConnectTools, type GetStartedConnect } from "./connect.js";
+import { joinNames, type GetStartedGallery } from "./gallery.js";
 import { GetStartedRecipeBots } from "./recipe-bots.js";
 
 export interface GetStartedWizardProps {
@@ -26,8 +28,33 @@ export interface GetStartedWizardProps {
   dispatch(event: GetStartedWizardEvent): void;
   onFinish(): void;
   onSkipAll(): void;
-  /** App connections for the last screen; absent when the surface cannot connect apps. */
+  /** App connections for step 3 and the bots; absent when the surface cannot connect apps. */
   connect?: GetStartedConnect | null;
+  /** App Gallery for step 5; absent when the surface has none. */
+  gallery?: GetStartedGallery | null;
+}
+
+/** App Gallery apps the owner's current connections make ready. */
+function useReadyApps(gallery: GetStartedGallery | null, connect: GetStartedConnect | null): GetStartedReadyApp[] {
+  return useMemo(
+    () => (gallery && connect ? galleryAppsReadyWith(gallery.apps, connect.connectedServices) : []),
+    [gallery, connect],
+  );
+}
+
+/** Reports live connections once read, so the connected integrations become the owner's tools. */
+function useReportConnections(connect: GetStartedConnect | null, dispatch: (event: GetStartedWizardEvent) => void): void {
+  const loaded = connect?.connectionsLoaded === true;
+  const services = loaded ? [...connect.connectedServices].sort().join(",") : "";
+  useEffect(() => {
+    // Unread connections are unknown, not empty: the saved tools stand until they are read.
+    if (loaded) dispatch({ type: "connected", services: services ? services.split(",") : [] });
+  }, [loaded, services, dispatch]);
+}
+
+/** The services the ready apps use, in the order they first appear. */
+function readyServiceNames(ready: readonly GetStartedReadyApp[]): string[] {
+  return [...new Set(ready.flatMap((entry) => entry.using.map((service) => service.name)))];
 }
 
 const FOCUSABLE = "button:not([disabled]), input:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])";
@@ -91,26 +118,28 @@ function Summary({ wizard, answers }: { wizard: GetStartedWizardState; answers: 
   );
 }
 
-function stepTitle(wizard: GetStartedWizardState): string {
+function stepTitle(wizard: GetStartedWizardState, ready: readonly GetStartedReadyApp[]): string {
   const name = wizard.name.trim();
   switch (wizard.step) {
     case "name": return "What should we call you?";
     case "goals": return "What will you use Matrix for?";
-    case "tools": return "Which tools do you use?";
+    case "tools": return "Connect the tools you use";
     case "ai": return "Name your main bot";
-    case "gallery": return "Build your own apps";
+    case "gallery": return ready.length > 0 ? "Apps ready with your data" : "Build your own apps";
     case "bots": return "Meet your bots";
     case "summary": return name ? `All set, ${name}.` : "All set.";
   }
 }
 
-function stepHint(wizard: GetStartedWizardState): string {
+function stepHint(wizard: GetStartedWizardState, ready: readonly GetStartedReadyApp[]): string {
   switch (wizard.step) {
     case "name": return "Your AI will use this.";
     case "goals": return "Pick any. We'll set up those first.";
-    case "tools": return "Nothing connects yet. This tells us what to set up first.";
+    case "tools": return "Each one opens the app's own sign-in. Connect any now, or later in Settings.";
     case "ai": return "This is your main bot. It uses this name and style everywhere you talk to Matrix.";
-    case "gallery": return "Describe an app and Matrix builds it for you to keep and use. Pick one to start with.";
+    case "gallery": return ready.length > 0
+      ? `Because you connected ${joinNames(readyServiceNames(ready))}, these apps are ready with your data.`
+      : "Describe an app and Matrix builds it for you to keep and use. Pick one to start with.";
     case "bots": return "Bots are AI teammates that each do one job for you. Add any you like.";
     case "summary": return "You can change any of this later.";
   }
@@ -146,10 +175,12 @@ function SignInPending({ connect, step }: { connect: GetStartedConnect | null; s
 }
 
 /** The questions after the name: one body per step, under the shared heading. */
-function StepContent({ wizard, answers, connect, dispatch, titleId }: {
+function StepContent({ wizard, answers, connect, gallery, ready, dispatch, titleId }: {
   wizard: GetStartedWizardState;
   answers: GetStartedAnswers;
   connect: GetStartedConnect | null;
+  gallery: GetStartedGallery | null;
+  ready: readonly GetStartedReadyApp[];
   dispatch(event: GetStartedWizardEvent): void;
   titleId: string;
 }) {
@@ -170,21 +201,17 @@ function StepContent({ wizard, answers, connect, dispatch, titleId }: {
         {getStartedToolGroupsForGoals(wizard.goals).map((group) => (
           <ChoiceGroup key={group.goal} group={group} wizard={wizard} dispatch={dispatch} />
         ))}
+        <GetStartedConnectTools goals={wizard.goals} connect={connect} />
       </div>
     );
     case "ai": return <GetStartedAiStep bot={wizard.bot} answers={answers} dispatch={dispatch} />;
-    case "gallery": return <GetStartedAppGalleryStep wizard={wizard} dispatch={dispatch} labelledBy={titleId} />;
+    case "gallery": return <GetStartedAppGalleryStep wizard={wizard} dispatch={dispatch} labelledBy={titleId} gallery={gallery} ready={ready} />;
     case "bots": return <GetStartedRecipeBots wizard={wizard} connect={connect} dispatch={dispatch} />;
-    case "summary": return (
-      <>
-        <Summary wizard={wizard} answers={answers} />
-        {connect ? <GetStartedConnectList answers={answers} connect={connect} /> : null}
-      </>
-    );
+    case "summary": return <Summary wizard={wizard} answers={answers} />;
   }
 }
 
-export function GetStartedWizard({ wizard, submitting, error, dispatch, onFinish, onSkipAll, connect = null }: GetStartedWizardProps) {
+export function GetStartedWizard({ wizard, submitting, error, dispatch, onFinish, onSkipAll, connect = null, gallery = null }: GetStartedWizardProps) {
   const titleId = useId();
   const hintId = useId();
   const focusTarget = useRef<HTMLElement | null>(null);
@@ -195,6 +222,10 @@ export function GetStartedWizard({ wizard, submitting, error, dispatch, onFinish
   const answers = useMemo(() => getStartedAnswersFromWizard(wizard), [wizard]);
   // A name bot creation would reject cannot be confirmed; the AI step explains why.
   const botNameInvalid = wizard.step === "ai" && getStartedBotFromWizard(wizard.bot) === null;
+  const ready = useReadyApps(gallery, connect);
+  useReportConnections(connect, dispatch);
+  // An app still being added keeps the owner here, so a failure and its retry are never missed.
+  const leaving = submitting || (wizard.step === "gallery" && Boolean(gallery?.installing));
 
   // Each step change moves focus to its field, or its heading, for keyboard and screen reader users.
   useEffect(() => {
@@ -226,9 +257,9 @@ export function GetStartedWizard({ wizard, submitting, error, dispatch, onFinish
           tabIndex={-1}
           ref={wizard.step === "name" ? undefined : (node) => { focusTarget.current = node; }}
         >
-          {stepTitle(wizard)}
+          {stepTitle(wizard, ready)}
         </h2>
-        <p id={hintId} className="mxo-muted mxo-gs__hint">{stepHint(wizard)}</p>
+        <p id={hintId} className="mxo-muted mxo-gs__hint">{stepHint(wizard, ready)}</p>
 
         {wizard.step === "name" ? (
           <input
@@ -245,7 +276,7 @@ export function GetStartedWizard({ wizard, submitting, error, dispatch, onFinish
           />
         ) : null}
 
-        <StepContent wizard={wizard} answers={answers} connect={connect} dispatch={dispatch} titleId={titleId} />
+        <StepContent wizard={wizard} answers={answers} connect={connect} gallery={gallery} ready={ready} dispatch={dispatch} titleId={titleId} />
 
         {error ? <p className="mxo-failed-line" role="alert">{error}</p> : null}
         <SignInPending connect={connect} step={wizard.step} />
@@ -255,7 +286,7 @@ export function GetStartedWizard({ wizard, submitting, error, dispatch, onFinish
         {wizard.step === "name" ? (
           <button type="button" className="mxo-link" onClick={onSkipAll} disabled={endBlocked}>Skip setup</button>
         ) : (
-          <button type="button" className="mxo-btn mxo-btn--ghost" onClick={() => dispatch({ type: "back" })} disabled={submitting}>Back</button>
+          <button type="button" className="mxo-btn mxo-btn--ghost" onClick={() => dispatch({ type: "back" })} disabled={leaving}>Back</button>
         )}
         <ButtonRow>
           {isSummary ? (
@@ -264,8 +295,8 @@ export function GetStartedWizard({ wizard, submitting, error, dispatch, onFinish
             </button>
           ) : (
             <>
-              <button type="button" className="mxo-btn mxo-btn--ghost" onClick={() => dispatch({ type: "skip" })}>Skip</button>
-              <button type="button" className="mxo-btn mxo-btn--dark" disabled={botNameInvalid} onClick={() => dispatch({ type: "next" })}>
+              <button type="button" className="mxo-btn mxo-btn--ghost" disabled={leaving} onClick={() => dispatch({ type: "skip" })}>Skip</button>
+              <button type="button" className="mxo-btn mxo-btn--dark" disabled={botNameInvalid || leaving} onClick={() => dispatch({ type: "next" })}>
                 {wizard.step === "bots" ? "Finish" : "Next"}
               </button>
             </>
