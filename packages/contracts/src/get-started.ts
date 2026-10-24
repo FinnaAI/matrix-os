@@ -1,4 +1,5 @@
 import { z } from "zod/v4";
+import { GetStartedBotSchema } from "#get-started-bot";
 
 // Spec 635: the Get started wizard. Answers are stable IDs from this catalog,
 // never display strings, so the gateway can validate them and later layers
@@ -6,8 +7,8 @@ import { z } from "zod/v4";
 
 export const GET_STARTED_NAME_MAX_CHARS = 40;
 export const GET_STARTED_DRAFT_MAX_BYTES = 4 * 1024;
-/** Name, goals, tools and (P2) the AI's name: the last step index is this minus one. */
-export const GET_STARTED_STEP_COUNT = 4;
+/** Name, goals, tools, the AI's name and style, and the summary: the last step index is this minus one. */
+export const GET_STARTED_STEP_COUNT = 5;
 
 export const GET_STARTED_GOALS = [
   { id: "code", label: "Write code with agents" },
@@ -90,10 +91,10 @@ export const GET_STARTED_TOOL_GROUPS: readonly GetStartedToolGroup[] = [
 ];
 
 export const GET_STARTED_APP_IDEAS = [
-  { id: "habit-tracker", label: "Habit tracker" },
-  { id: "client-crm", label: "Client CRM" },
-  { id: "budget-planner", label: "Budget planner" },
-  { id: "recipe-box", label: "Recipe box" },
+  { id: "habit-tracker", label: "Habit tracker", request: "Track my habits and show my streaks" },
+  { id: "client-crm", label: "Client CRM", request: "Keep track of my clients, deals and follow-ups" },
+  { id: "budget-planner", label: "Budget planner", request: "Plan my monthly budget and track my spending" },
+  { id: "recipe-box", label: "Recipe box", request: "Save my recipes and plan my meals" },
 ] as const;
 
 export type GetStartedAppIdeaId = (typeof GET_STARTED_APP_IDEAS)[number]["id"];
@@ -136,12 +137,14 @@ function uniqueList<T extends string>(item: z.ZodType<T>, max: number) {
   return z.array(item).max(max).default([]).transform((values) => [...new Set(values)]);
 }
 
+/** The owner's name is rendered into SOUL, so it may not carry controls or HTML comment markers. */
 const NameSchema = z
   .string()
   .trim()
   .min(1)
   .max(GET_STARTED_NAME_MAX_CHARS)
-  .regex(/^[^\p{Cc}]*$/u);
+  .regex(/^[^\p{Cc}]*$/u)
+  .refine((value) => !value.includes("<!--") && !value.includes("-->"));
 
 const answerShape = {
   name: NameSchema.optional(),
@@ -149,6 +152,7 @@ const answerShape = {
   tools: uniqueList(z.enum(GET_STARTED_TOOL_IDS), GET_STARTED_TOOL_IDS.length),
   appIdea: z.enum(appIdeaIds).optional(),
   starter: z.enum(starterIds).optional(),
+  bot: GetStartedBotSchema.optional(),
 };
 
 export const GetStartedAnswersSchema = z.object(answerShape).strict();

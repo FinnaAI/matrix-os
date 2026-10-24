@@ -1,6 +1,8 @@
 import {
   GET_STARTED_GOALS,
+  GET_STARTED_PERSONALITIES,
   getStartedAnswersFromWizard,
+  getStartedBotFromWizard,
   getStartedQuestionProgress,
   getStartedToolGroupsForGoals,
   type GetStartedChoiceGroup,
@@ -10,6 +12,7 @@ import {
 } from "@matrix-os/contracts";
 import { useEffect, useId, useMemo, useRef, type KeyboardEvent, type ReactNode } from "react";
 import { ButtonRow, RabbitAvatar, ToggleChip } from "../onboarding-widget/parts.js";
+import { GetStartedAiStep } from "./ai-step.js";
 import { GetStartedConnectList, type GetStartedConnect } from "./connect.js";
 
 export interface GetStartedWizardProps {
@@ -23,7 +26,7 @@ export interface GetStartedWizardProps {
   connect?: GetStartedConnect | null;
 }
 
-const FOCUSABLE = "button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex='-1'])";
+const FOCUSABLE = "button:not([disabled]), input:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])";
 
 function ChoiceGroup({ group, wizard, dispatch }: {
   group: GetStartedChoiceGroup;
@@ -54,6 +57,13 @@ function ChoiceGroup({ group, wizard, dispatch }: {
   );
 }
 
+/** The AI as finishing saves it, so a blank name shows as Matrix, like the saved one. */
+function yourAi(wizard: GetStartedWizardState): string {
+  const bot = wizard.botChosen ? getStartedBotFromWizard(wizard.bot) : null;
+  if (!bot) return "Matrix";
+  return `${bot.name} · ${GET_STARTED_PERSONALITIES.find((personality) => personality.id === bot.personality)?.label ?? ""}`;
+}
+
 function Summary({ wizard }: { wizard: GetStartedWizardState }) {
   const picked = new Set(wizard.goals);
   const goals = GET_STARTED_GOALS.filter((goal) => picked.has(goal.id)).map((goal) => goal.label);
@@ -65,7 +75,7 @@ function Summary({ wizard }: { wizard: GetStartedWizardState }) {
       </div>
       <div>
         <dt>Your AI</dt>
-        <dd>Matrix</dd>
+        <dd>{yourAi(wizard)}</dd>
       </div>
     </dl>
   );
@@ -77,6 +87,7 @@ function stepTitle(wizard: GetStartedWizardState): string {
     case "name": return "What should we call you?";
     case "goals": return "What will you use Matrix for?";
     case "tools": return "Which tools do you use?";
+    case "ai": return "Give your AI a name";
     case "summary": return name ? `All set, ${name}.` : "All set.";
   }
 }
@@ -86,6 +97,7 @@ function stepHint(wizard: GetStartedWizardState): string {
     case "name": return "Your AI will use this.";
     case "goals": return "Pick any. We'll set up those first.";
     case "tools": return "Nothing connects yet. This tells us what to set up first.";
+    case "ai": return "It uses this name and style everywhere you talk to Matrix.";
     case "summary": return "You can change any of this later.";
   }
 }
@@ -129,6 +141,8 @@ export function GetStartedWizard({ wizard, submitting, error, dispatch, onFinish
   const endBlocked = submitting || Boolean(connect?.connectingService);
   const pickedGoals = new Set(wizard.goals);
   const answers = useMemo(() => getStartedAnswersFromWizard(wizard), [wizard]);
+  // A name bot creation would reject cannot be confirmed; the AI step explains why.
+  const botNameInvalid = wizard.step === "ai" && getStartedBotFromWizard(wizard.bot) === null;
 
   // Each step change moves focus to its field, or its heading, for keyboard and screen reader users.
   useEffect(() => {
@@ -195,6 +209,8 @@ export function GetStartedWizard({ wizard, submitting, error, dispatch, onFinish
           </div>
         ) : null}
 
+        {wizard.step === "ai" ? <GetStartedAiStep bot={wizard.bot} answers={answers} dispatch={dispatch} /> : null}
+
         {isSummary ? <Summary wizard={wizard} /> : null}
         {isSummary && connect ? <GetStartedConnectList answers={answers} connect={connect} /> : null}
 
@@ -216,8 +232,8 @@ export function GetStartedWizard({ wizard, submitting, error, dispatch, onFinish
           ) : (
             <>
               <button type="button" className="mxo-btn mxo-btn--ghost" onClick={() => dispatch({ type: "skip" })}>Skip</button>
-              <button type="button" className="mxo-btn mxo-btn--dark" onClick={() => dispatch({ type: "next" })}>
-                {wizard.step === "tools" ? "Finish" : "Next"}
+              <button type="button" className="mxo-btn mxo-btn--dark" disabled={botNameInvalid} onClick={() => dispatch({ type: "next" })}>
+                {wizard.step === "ai" ? "Finish" : "Next"}
               </button>
             </>
           )}

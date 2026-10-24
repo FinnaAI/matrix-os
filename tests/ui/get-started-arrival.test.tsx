@@ -58,7 +58,7 @@ describe("Get started answers", () => {
     render(
       <GetStartedAnswersProvider scope="alice">
         <Goals />
-        <GetStartedGate port={port({ status: "in_progress", updatedAt: AT, draft: { step: 3, goals: ["build"], tools: [] } })} zIndex={1} />
+        <GetStartedGate port={port({ status: "in_progress", updatedAt: AT, draft: { step: 4, goals: ["build"], tools: [] } })} zIndex={1} />
       </GetStartedAnswersProvider>,
     );
     expect(screen.getByTestId("goals")).toHaveTextContent("unknown");
@@ -139,5 +139,22 @@ describe("onboarding widget tasks", () => {
     expect(labels[0]).toContain("Work on my code");
     expect(labels).toHaveLength(4);
     expect(screen.getByText("Hey Sam 👋")).toBeInTheDocument();
+  });
+
+  it("show the goal intro and a first app to build, which asks before running", () => {
+    const dispatch = vi.fn();
+    render(
+      <TasksScreen
+        state={state}
+        apps={[]}
+        actions={{ dispatch } as unknown as OnboardingWidgetActions}
+        intro="Want me to build your first app?"
+        buildSuggestion={{ title: "Habit tracker", prompt: "[BUILD] Build an app for my Matrix computer: Track my habits." }}
+      />,
+    );
+    expect(screen.getByText("Want me to build your first app?")).toBeInTheDocument();
+    expect(dispatch).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Build a habit tracker" }));
+    expect(dispatch).toHaveBeenCalledWith({ type: "build.requested", title: "Habit tracker", prompt: "[BUILD] Build an app for my Matrix computer: Track my habits." });
   });
 });

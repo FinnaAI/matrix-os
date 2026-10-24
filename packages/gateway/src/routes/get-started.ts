@@ -1,14 +1,16 @@
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import {
   GetStartedStateSchema,
   GetStartedUpdateSchema,
+  type GetStartedAnswers,
   type GetStartedResponse,
   type GetStartedState,
   type GetStartedUpdate,
 } from "@matrix-os/contracts";
 import { withPinnedSystemDir, type PinnedSystemDir } from "../get-started/owner-system-dir.js";
 import { OwnerFileMutationBusyError, withOwnerFileMutation } from "../owner-file-mutations.js";
+import { applyGetStartedPersonality } from "../get-started/personality.js";
 
 // Spec 635, Section 1. The state file is only ever created for new homes
 // (Section 2), so a missing file means "not eligible", never "pending". Both files
@@ -20,12 +22,23 @@ const STATE_FILE_MAX_BYTES = 16 * 1024;
 
 const LOAD_ERROR = "Unable to load your setup";
 const SAVE_ERROR = "Unable to save your setup";
+const BOTS_ERROR = "Bots are unavailable on this computer";
+
+/** The bot result key for the owner's personal Matrix Bot. */
+const MATRIX_BOT = "matrix-bot";
+// A finished setup retries its saved bots when read, at most this often per owner.
+const BOT_RECONCILE_COOLDOWN_MS = 10 * 60 * 1000;
+const BOT_RECONCILE_MAX_OWNERS = 256;
 
 export interface GetStartedRoutesOptions {
   homePath: string;
   /** Kill switch (`MATRIX_GET_STARTED_ENABLED`). When false every home reads as not eligible. */
   enabled: boolean;
   now?: () => Date;
+  /** The authenticated owner, for creating their Matrix Bot. */
+  getOwnerId?: (c: Context) => string | null;
+  /** Creates (or replays) the owner's personal Matrix Bot. Best effort: setup never fails on it. */
+  ensureMatrixBot?: (ownerId: string, name: string) => Promise<void>;
 }
 
 class GetStartedStateCorruptError extends Error {
@@ -98,10 +111,53 @@ export function createGetStartedRoutes(opts: GetStartedRoutesOptions) {
   const now = opts.now ?? (() => new Date());
   const app = new Hono();
 
+  /**
+   * Creates (or replays) the owner's saved bot choices. The saved answers are the durable
+   * intent and the fixed request IDs keep this idempotent: a retry never duplicates a bot and
+   * never brings back one the owner deleted. Each failure is logged and reported, never thrown.
+   */
+  async function ensureSavedBots(ownerId: string, answers: GetStartedAnswers): Promise<Record<string, "ready" | "failed">> {
+    const results: Record<string, "ready" | "failed"> = {};
+    if (answers.bot && opts.ensureMatrixBot) {
+      try {
+        await opts.ensureMatrixBot(ownerId, answers.bot.name);
+        results[MATRIX_BOT] = "ready";
+      } catch (botError: unknown) {
+        console.warn("[get-started] Matrix Bot unavailable:", errorName(botError));
+        results[MATRIX_BOT] = "failed";
+      }
+    }
+    return results;
+  }
+
+  // Owner -> when their saved bots were last ensured; bounded, oldest evicted first.
+  const lastEnsured = new Map<string, number>();
+  function markEnsured(ownerId: string): void {
+    lastEnsured.delete(ownerId);
+    lastEnsured.set(ownerId, now().getTime());
+    while (lastEnsured.size > BOT_RECONCILE_MAX_OWNERS) {
+      const oldest = lastEnsured.keys().next().value;
+      if (oldest === undefined) break;
+      lastEnsured.delete(oldest);
+    }
+  }
+
+  /** Spec 635: a bot whose creation failed is retried when the finished setup is next read. */
+  function reconcileSavedBots(c: Context, state: GetStartedState): void {
+    if (state.status !== "completed" || !state.answers.bot || !opts.ensureMatrixBot) return;
+    const ownerId = opts.getOwnerId?.(c) ?? null;
+    if (!ownerId) return;
+    const last = lastEnsured.get(ownerId);
+    if (last !== undefined && now().getTime() - last < BOT_RECONCILE_COOLDOWN_MS) return;
+    markEnsured(ownerId);
+    void ensureSavedBots(ownerId, state.answers);
+  }
+
   app.get("/", async (c) => {
     if (!enabled) return c.json({ status: "not_eligible" } satisfies GetStartedResponse);
     try {
       const state = await withPinnedSystemDir(homePath, readState);
+      if (state) reconcileSavedBots(c, state);
       return c.json(state ? toResponse(state) : ({ status: "not_eligible" } satisfies GetStartedResponse));
     } catch (err) {
       console.warn("[get-started] Failed to read state:", errorName(err));
@@ -129,22 +185,56 @@ export function createGetStartedRoutes(opts: GetStartedRoutesOptions) {
           const current = await readState(dir);
           if (!current) return null;
           const transition = transitionGetStarted(current, update, now());
-          if (transition.kind === "write") await dir.writeAtomic(STATE_FILE, `${JSON.stringify(transition.state, null, 2)}\n`, 0o644);
-          if (transition.kind !== "conflict" && isTerminal(transition.state)) {
-            await ensureOnboardingMarker(dir, now().toISOString());
+          if (transition.kind === "conflict") return transition;
+          // The owner's choices are written before setup is saved as completed, so a failed
+          // SOUL write leaves setup unfinished and the wizard offers a retry. Idempotent: a
+          // repeated completion reapplies them.
+          const next = transition.state;
+          if (next.status === "completed" && next.answers.bot) {
+            await applyGetStartedPersonality(homePath, { ...next.answers, bot: next.answers.bot });
           }
+          if (transition.kind === "write") await dir.writeAtomic(STATE_FILE, `${JSON.stringify(next, null, 2)}\n`, 0o644);
+          if (isTerminal(next)) await ensureOnboardingMarker(dir, now().toISOString());
           return transition;
         });
         return saved ?? ({ kind: "not_eligible" } as const);
       });
       if (result.kind === "not_eligible") return c.json({ error: "Get started is not available" }, 404);
       if (result.kind === "conflict") return c.json({ error: "Your setup is already finished" }, 409);
+      // Outside the file lock: bot creation touches the database and has its own idempotency.
+      // A failure keeps the saved choice, so a later read or POST /bots retries it.
+      if (result.state.status === "completed" && result.state.answers.bot && opts.ensureMatrixBot) {
+        const ownerId = opts.getOwnerId?.(c) ?? null;
+        if (!ownerId) console.warn("[get-started] Matrix Bot skipped: no request principal");
+        else {
+          markEnsured(ownerId);
+          await ensureSavedBots(ownerId, result.state.answers);
+        }
+      }
       return c.json(toResponse(result.state));
     } catch (err) {
       if (err instanceof OwnerFileMutationBusyError) return c.json({ error: SAVE_ERROR }, 503);
       console.warn("[get-started] Failed to save state:", errorName(err));
       return c.json({ error: SAVE_ERROR }, 500);
     }
+  });
+
+  /** Spec 635: retries the saved bot choices on request, e.g. from Getting started's Create action. */
+  app.post("/bots", bodyLimit({ maxSize: PUT_BODY_LIMIT }), async (c) => {
+    if (!enabled) return c.json({ error: "Get started is not available" }, 404);
+    if (!opts.ensureMatrixBot) return c.json({ error: BOTS_ERROR }, 503);
+    const ownerId = opts.getOwnerId?.(c) ?? null;
+    if (!ownerId) return c.json({ error: "Unauthorized" }, 401);
+    let state: GetStartedState | null;
+    try {
+      state = await withPinnedSystemDir(homePath, readState);
+    } catch (err) {
+      console.warn("[get-started] Failed to read state:", errorName(err));
+      return c.json({ error: LOAD_ERROR }, 500);
+    }
+    if (state?.status !== "completed") return c.json({ error: "Get started is not finished" }, 404);
+    markEnsured(ownerId);
+    return c.json({ bots: await ensureSavedBots(ownerId, state.answers) });
   });
 
   return app;
