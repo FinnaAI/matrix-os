@@ -9,6 +9,7 @@ import {
   deriveGettingStartedSnapshot,
   emptyGettingStartedSnapshot,
   gettingStartedRows,
+  mergeTrySuggestion,
 } from "../../packages/contracts/src/index.js";
 
 describe("personalised arrival order", () => {
@@ -105,8 +106,11 @@ describe("Getting started rows from the owner's choices", () => {
     const { rows, completedCount, total } = gettingStartedRows(snapshot(["linear"]), answers);
     const tools = rows.filter((row) => row.kind === "tool");
     expect(tools).toEqual([
-      { kind: "tool", id: "tool:linear", label: "Connect Linear", status: "complete", service: "linear" },
-      { kind: "tool", id: "tool:figma", label: "Connect Figma", status: "incomplete", service: "figma" },
+      {
+        kind: "tool", id: "tool:linear", label: "Connect Linear", status: "complete", service: "linear",
+        try: { label: "Summarize my open Linear issues", prompt: "Summarize my open Linear issues by priority. Don't change anything." },
+      },
+      { kind: "tool", id: "tool:figma", label: "Connect Figma", status: "incomplete", service: "figma", connect: "figma" },
     ]);
     expect(rows[0]).toMatchObject({ kind: "step", id: "agent", label: "Log in to Codex" });
     expect({ completedCount, total }).toEqual({ completedCount: 2, total: 7 });
@@ -139,6 +143,73 @@ describe("Getting started rows from the owner's choices", () => {
   });
 });
 
+describe("Getting started rows close the loop", () => {
+  const fulfilled = (value: unknown): PromiseSettledResult<unknown> => ({ status: "fulfilled", value });
+  function snapshot(services: string[], agents: { agent: string; status: string }[] = []) {
+    return deriveGettingStartedSnapshot({
+      github: fulfilled({ authenticated: false }),
+      integrations: fulfilled(services.map((service, index) => ({ id: `c${index}`, service, status: "active" }))),
+      agents: fulfilled({ agents }),
+      projects: fulfilled({ projects: [] }),
+      chats: fulfilled({ items: [] }),
+      billing: fulfilled({ access: { runtimeProxyAllowed: false } }),
+    });
+  }
+  const row = (rows: ReturnType<typeof gettingStartedRows>["rows"], id: string) => rows.find((candidate) => candidate.id === id);
+
+  it("names the app each unfinished connect row signs in to, and nothing once done", () => {
+    const { rows } = gettingStartedRows(snapshot([]), { goals: [], tools: ["linear"] });
+    expect(row(rows, "github")).toMatchObject({ connect: "github" });
+    expect(row(rows, "email-calendar")).toMatchObject({ label: "Connect email & calendar", connect: "gmail" });
+    expect(row(rows, "tool:linear")).toMatchObject({ connect: "linear" });
+    const done = gettingStartedRows(snapshot(["github", "linear", "gmail", "google_calendar"]), { goals: [], tools: ["linear"] }).rows;
+    for (const id of ["github", "email-calendar", "tool:linear"]) expect(row(done, id)).not.toHaveProperty("connect");
+  });
+
+  it("shows email & calendar as half done and connects the missing one", () => {
+    expect(row(gettingStartedRows(snapshot(["gmail"]), null).rows, "email-calendar"))
+      .toMatchObject({ label: "Connect Google Calendar (1 of 2)", status: "incomplete", connect: "google_calendar" });
+    expect(row(gettingStartedRows(snapshot(["google_calendar"]), null).rows, "email-calendar"))
+      .toMatchObject({ label: "Connect Gmail (1 of 2)", connect: "gmail" });
+  });
+
+  it("says where the coding agent must be signed in until it is", () => {
+    expect(row(gettingStartedRows(snapshot([]), null).rows, "agent")).toMatchObject({ detail: "On your Matrix computer, where your AI runs" });
+    expect(row(gettingStartedRows(snapshot([], [{ agent: "codex", status: "available" }]), null).rows, "agent")).not.toHaveProperty("detail");
+  });
+});
+
+describe("Getting started try actions", () => {
+  const fulfilled = (value: unknown): PromiseSettledResult<unknown> => ({ status: "fulfilled", value });
+  function snapshot(services: string[], github = false) {
+    return deriveGettingStartedSnapshot({
+      github: fulfilled({ authenticated: github }),
+      integrations: fulfilled(services.map((service, index) => ({ id: `c${index}`, service, status: "active" }))),
+      agents: fulfilled({ agents: [] }),
+      projects: fulfilled({ projects: [] }),
+      chats: fulfilled({ items: [] }),
+      billing: fulfilled({ access: { runtimeProxyAllowed: true } }),
+    });
+  }
+  const row = (rows: ReturnType<typeof gettingStartedRows>["rows"], id: string) => rows.find((candidate) => candidate.id === id);
+
+  it("turns a finished connection into something useful to try, read-only", () => {
+    const { rows } = gettingStartedRows(snapshot(["gmail", "google_calendar", "linear", "figma"], true), { goals: [], tools: ["linear", "figma"] });
+    expect(row(rows, "email-calendar")?.try?.label).toBe("Find emails that need a reply");
+    expect(row(rows, "github")?.try?.label).toBe("List my GitHub repos");
+    expect(row(rows, "tool:linear")?.try?.label).toBe("Summarize my open Linear issues");
+    for (const id of ["email-calendar", "github", "tool:linear"]) {
+      expect(row(rows, id)?.try?.prompt).toMatch(/Don't (send|change) anything/);
+    }
+    expect(row(rows, "tool:figma")).not.toHaveProperty("try");
+  });
+
+  it("offers nothing to try until the step is done", () => {
+    const { rows } = gettingStartedRows(snapshot(["gmail"]), { goals: [], tools: ["linear"] });
+    for (const id of ["email-calendar", "github", "tool:linear"]) expect(row(rows, id)).not.toHaveProperty("try");
+  });
+});
+
 describe("widget tasks from the owner's choices", () => {
   it("leads with the tasks their picked tools and starter unlock, then their goals", () => {
     expect(getStartedTaskOrder(["business"], { tools: ["github"] })[0]).toBe("work-on-code");
@@ -146,5 +217,19 @@ describe("widget tasks from the owner's choices", () => {
     expect(getStartedTaskOrder(["explore"], { starter: "ask-anything" })[0]).toBe("research");
     expect(getStartedTaskOrder(["explore"], { starter: "build-something-small" })[0]).toBe("build-website");
     expect(getStartedTaskOrder(["code"], { tools: ["google-calendar"] }).slice(0, 2)).toEqual(["plan-week", "work-on-code"]);
+  });
+
+  it("merges a Try suggestion without ever losing the owner's own text", () => {
+    let draft = mergeTrySuggestion("", null, "A");
+    expect(draft.text).toBe("A");
+    draft = mergeTrySuggestion(draft.text, draft, "B");
+    expect(draft.text).toBe("B");
+    draft = mergeTrySuggestion("my idea", draft, "C");
+    expect(draft.text).toBe("my idea\n\nC");
+    draft = mergeTrySuggestion(draft.text, draft, "D");
+    expect(draft.text).toBe("my idea\n\nD");
+    // An edit after the suggestion is the owner's text now.
+    draft = mergeTrySuggestion("my idea\n\nD, and more", draft, "E");
+    expect(draft.text).toBe("my idea\n\nD, and more\n\nE");
   });
 });
