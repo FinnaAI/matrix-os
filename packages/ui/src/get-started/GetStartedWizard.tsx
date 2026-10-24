@@ -1,10 +1,12 @@
 import {
   GET_STARTED_GOALS,
   GET_STARTED_PERSONALITIES,
+  GET_STARTED_RECIPE_BOTS,
   getStartedAnswersFromWizard,
   getStartedBotFromWizard,
   getStartedQuestionProgress,
   getStartedToolGroupsForGoals,
+  type GetStartedAnswers,
   type GetStartedChoiceGroup,
   type GetStartedWizardEvent,
   type GetStartedWizardState,
@@ -13,7 +15,9 @@ import {
 import { useEffect, useId, useMemo, useRef, type KeyboardEvent, type ReactNode } from "react";
 import { ButtonRow, RabbitAvatar, ToggleChip } from "../onboarding-widget/parts.js";
 import { GetStartedAiStep } from "./ai-step.js";
+import { GetStartedAppGalleryStep } from "./app-gallery-step.js";
 import { GetStartedConnectList, type GetStartedConnect } from "./connect.js";
+import { GetStartedRecipeBots } from "./recipe-bots.js";
 
 export interface GetStartedWizardProps {
   wizard: GetStartedWizardState;
@@ -64,9 +68,11 @@ function yourAi(wizard: GetStartedWizardState): string {
   return `${bot.name} · ${GET_STARTED_PERSONALITIES.find((personality) => personality.id === bot.personality)?.label ?? ""}`;
 }
 
-function Summary({ wizard }: { wizard: GetStartedWizardState }) {
+function Summary({ wizard, answers }: { wizard: GetStartedWizardState; answers: GetStartedAnswers }) {
   const picked = new Set(wizard.goals);
   const goals = GET_STARTED_GOALS.filter((goal) => picked.has(goal.id)).map((goal) => goal.label);
+  const addedBots = new Set(answers.bots ?? []);
+  const bots = GET_STARTED_RECIPE_BOTS.filter((bot) => addedBots.has(bot.recipeId)).map((bot) => bot.label);
   return (
     <dl className="mxo-card mxo-gs__summary">
       <div>
@@ -76,6 +82,10 @@ function Summary({ wizard }: { wizard: GetStartedWizardState }) {
       <div>
         <dt>Your AI</dt>
         <dd>{yourAi(wizard)}</dd>
+      </div>
+      <div>
+        <dt>Your bots</dt>
+        <dd>{bots.length > 0 ? bots.join(", ") : "None yet"}</dd>
       </div>
     </dl>
   );
@@ -87,7 +97,9 @@ function stepTitle(wizard: GetStartedWizardState): string {
     case "name": return "What should we call you?";
     case "goals": return "What will you use Matrix for?";
     case "tools": return "Which tools do you use?";
-    case "ai": return "Give your AI a name";
+    case "ai": return "Name your main bot";
+    case "gallery": return "Build your own apps";
+    case "bots": return "Meet your bots";
     case "summary": return name ? `All set, ${name}.` : "All set.";
   }
 }
@@ -97,7 +109,9 @@ function stepHint(wizard: GetStartedWizardState): string {
     case "name": return "Your AI will use this.";
     case "goals": return "Pick any. We'll set up those first.";
     case "tools": return "Nothing connects yet. This tells us what to set up first.";
-    case "ai": return "It uses this name and style everywhere you talk to Matrix.";
+    case "ai": return "This is your main bot. It uses this name and style everywhere you talk to Matrix.";
+    case "gallery": return "Describe an app and Matrix builds it for you to keep and use. Pick one to start with.";
+    case "bots": return "Bots are AI teammates that each do one job for you. Add any you like.";
     case "summary": return "You can change any of this later.";
   }
 }
@@ -131,6 +145,45 @@ function SignInPending({ connect, step }: { connect: GetStartedConnect | null; s
   return <p className="mxo-muted" role="status">Waiting for your app sign-in to finish.</p>;
 }
 
+/** The questions after the name: one body per step, under the shared heading. */
+function StepContent({ wizard, answers, connect, dispatch, titleId }: {
+  wizard: GetStartedWizardState;
+  answers: GetStartedAnswers;
+  connect: GetStartedConnect | null;
+  dispatch(event: GetStartedWizardEvent): void;
+  titleId: string;
+}) {
+  switch (wizard.step) {
+    case "name": return null;
+    case "goals": {
+      const pickedGoals = new Set(wizard.goals);
+      return (
+        <div className="mxo-chips" role="group" aria-labelledby={titleId}>
+          {GET_STARTED_GOALS.map((goal) => (
+            <ToggleChip key={goal.id} label={goal.label} pressed={pickedGoals.has(goal.id)} onToggle={() => dispatch({ type: "toggle-goal", goal: goal.id })} />
+          ))}
+        </div>
+      );
+    }
+    case "tools": return (
+      <div className="mxo-gs__groups">
+        {getStartedToolGroupsForGoals(wizard.goals).map((group) => (
+          <ChoiceGroup key={group.goal} group={group} wizard={wizard} dispatch={dispatch} />
+        ))}
+      </div>
+    );
+    case "ai": return <GetStartedAiStep bot={wizard.bot} answers={answers} dispatch={dispatch} />;
+    case "gallery": return <GetStartedAppGalleryStep wizard={wizard} dispatch={dispatch} labelledBy={titleId} />;
+    case "bots": return <GetStartedRecipeBots wizard={wizard} connect={connect} dispatch={dispatch} />;
+    case "summary": return (
+      <>
+        <Summary wizard={wizard} answers={answers} />
+        {connect ? <GetStartedConnectList answers={answers} connect={connect} /> : null}
+      </>
+    );
+  }
+}
+
 export function GetStartedWizard({ wizard, submitting, error, dispatch, onFinish, onSkipAll, connect = null }: GetStartedWizardProps) {
   const titleId = useId();
   const hintId = useId();
@@ -139,7 +192,6 @@ export function GetStartedWizard({ wizard, submitting, error, dispatch, onFinish
   const isSummary = wizard.step === "summary";
   // Ending the wizard unmounts its connector, which would drop an app sign-in still under way.
   const endBlocked = submitting || Boolean(connect?.connectingService);
-  const pickedGoals = new Set(wizard.goals);
   const answers = useMemo(() => getStartedAnswersFromWizard(wizard), [wizard]);
   // A name bot creation would reject cannot be confirmed; the AI step explains why.
   const botNameInvalid = wizard.step === "ai" && getStartedBotFromWizard(wizard.bot) === null;
@@ -193,26 +245,7 @@ export function GetStartedWizard({ wizard, submitting, error, dispatch, onFinish
           />
         ) : null}
 
-        {wizard.step === "goals" ? (
-          <div className="mxo-chips" role="group" aria-labelledby={titleId}>
-            {GET_STARTED_GOALS.map((goal) => (
-              <ToggleChip key={goal.id} label={goal.label} pressed={pickedGoals.has(goal.id)} onToggle={() => dispatch({ type: "toggle-goal", goal: goal.id })} />
-            ))}
-          </div>
-        ) : null}
-
-        {wizard.step === "tools" ? (
-          <div className="mxo-gs__groups">
-            {getStartedToolGroupsForGoals(wizard.goals).map((group) => (
-              <ChoiceGroup key={group.goal} group={group} wizard={wizard} dispatch={dispatch} />
-            ))}
-          </div>
-        ) : null}
-
-        {wizard.step === "ai" ? <GetStartedAiStep bot={wizard.bot} answers={answers} dispatch={dispatch} /> : null}
-
-        {isSummary ? <Summary wizard={wizard} /> : null}
-        {isSummary && connect ? <GetStartedConnectList answers={answers} connect={connect} /> : null}
+        <StepContent wizard={wizard} answers={answers} connect={connect} dispatch={dispatch} titleId={titleId} />
 
         {error ? <p className="mxo-failed-line" role="alert">{error}</p> : null}
         <SignInPending connect={connect} step={wizard.step} />
@@ -233,7 +266,7 @@ export function GetStartedWizard({ wizard, submitting, error, dispatch, onFinish
             <>
               <button type="button" className="mxo-btn mxo-btn--ghost" onClick={() => dispatch({ type: "skip" })}>Skip</button>
               <button type="button" className="mxo-btn mxo-btn--dark" disabled={botNameInvalid} onClick={() => dispatch({ type: "next" })}>
-                {wizard.step === "ai" ? "Finish" : "Next"}
+                {wizard.step === "bots" ? "Finish" : "Next"}
               </button>
             </>
           )}

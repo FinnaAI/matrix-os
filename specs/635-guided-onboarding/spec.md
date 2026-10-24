@@ -60,7 +60,9 @@ Times are positions in the demo video. Quoted copy is the intended product copy.
   - Sounds fun (exploring, or nothing picked): Build something small, Play a game, Ask anything
 
   Nothing connects here; these are preferences.
-- **Step 4, "Give your AI a name"** (Atlas, Nova, Ada, Sage or own; Brief / Friendly / Playful). Becomes the full P2 bot setup. Without P2 this step is dropped and the AI stays "Matrix".
+- **Step 4, "Name your main bot"** (Atlas, Nova, Ada, Sage or own; Brief / Friendly / Playful): "This is your main bot. It uses this name and style everywhere you talk to Matrix." Becomes the full P2 bot setup. Without P2 this step is dropped and the AI stays "Matrix".
+- **Step 5, "Build your own apps" (App Gallery):** shown to everyone. Four example apps as cards (Habit tracker, Client CRM, Budget planner, Recipe box) with icon and one line; picking one is the owner's app idea (shared with the "First app idea" choice on step 3), so Matrix offers to build it on arrival. "Make anything else in App Gallery anytime." Skip clears the pick.
+- **Step 6, "Meet your bots":** see Section 7b.
 
 ### Scene 2: All set + Connect your tools (0:13–0:18), P0
 
@@ -141,7 +143,7 @@ Personal Matrix Bot: at "Enter your computer", create it with `POST /api/chat-ag
 | `BootSequence.tsx` shows provisioning on the platform-served shell before the computer exists; the gateway is not reachable then. | Asking during provisioning needs platform storage and a platform/app-shell deploy. v1 runs the wizard when the desktop first loads; "during the build" is optional Section 8. |
 | Gateway `GET /api/settings/onboarding-status` checks `system/onboarding-complete.json`, which nothing writes any more. The platform `first_run` phase depends on a record only a backfill writes. | Neither tells new users from existing ones. v1 adds its own marker, written only for newly created homes (Section 2). |
 | `/files/system/soul.md` has a special-cased write path with 16 KiB and control-character validation (spec 551). | P2 renders the SOUL section on the server from validated choices. |
-| Getting started has fixed step IDs (`GETTING_STARTED_STEP_IDS`) with real completion detection. | v1 reorders existing steps by goal; completion stays as is. New steps need their own completion signal and are later. |
+| Getting started has fixed step IDs (`GETTING_STARTED_STEP_IDS`) with real completion detection. | The five steps keep their checks; rows added from answers use existing signals only (connected integrations, a bot's direct chat having messages). |
 | The onboarding widget is a shared reducer plus UI (`@matrix-os/contracts`, `@matrix-os/ui`) with thin hosts per surface (ENG-191). | The wizard is built the same way, so all three desktop surfaces share one implementation. |
 | Widget starter tasks include "Work on my code" → repo picker → run with work log → "Open in Chats" → one follow-up offer. | P1 maps onto the existing task: reorder it first, use the repo question as the opening, and make "fix the top issue on a branch" the follow-up offer. |
 | App Gallery is a sandboxed app; Build sends a fixed `[BUILD] …` prompt through `requestAppBuild`. | v1: the widget sends the same build prompt itself and opens the gallery afterwards. |
@@ -163,6 +165,7 @@ Personal Matrix Bot: at "Enter your computer", create it with `POST /api/chat-ag
 
 - `GET /api/settings/get-started` → `{ status: "not_eligible" }` or `{ status, draft? | answers? }`
 - `PUT /api/settings/get-started` → body `{ type: "draft" | "complete" | "skip", answers? }` (Zod discriminated union, strict)
+- `GET /api/settings/get-started/bots` → what each saved bot choice made `{ bots: { [recipeId]: { status: "created", agentId } | { status: "pending" } } }`, from its Get started creation requests. Getting started uses that bot, never another copy of the same recipe; the bot list leaves removed bots out, so this also tells a removed bot from one whose creation never finished
 - `POST /api/settings/get-started/bots` → retries the saved bot choices of a finished setup → `{ bots: { [recipeId]: "ready" | "failed" } }`
 
 A dedicated endpoint instead of generic file writes: answers are validated against enums and caps, files are written to fixed paths only, SOUL is rendered by the server (P2), and completion is one idempotent call. The generic `/files` route is unchanged.
@@ -180,6 +183,7 @@ A dedicated endpoint instead of generic file writes: answers are validated again
 | any `PUT` | not eligible | `404 { error: "Get started is not available" }` |
 | `POST /bots` | `completed` | `200 { bots }`, each saved bot created or replayed |
 | `POST /bots` | not finished or not eligible | `404`; no request principal `401`; no bot service `503` |
+| `GET /bots` | `completed` | `200 { bots }`; same `404` / `401` / `503` rules, `503` when status can't be read |
 
 ## Security architecture
 
@@ -188,6 +192,7 @@ A dedicated endpoint instead of generic file writes: answers are validated again
 | `/api/settings/get-started` | `GET` | Gateway global auth (owner runtime bearer or platform JWT) | No | n/a | none (no input) |
 | `/api/settings/get-started` | `PUT` | Gateway global auth (owner runtime bearer or platform JWT) | No | 8 KiB | strict Zod discriminated union |
 | `/api/settings/get-started/bots` | `POST` | Gateway global auth; request principal required (`401` without) | No | 8 KiB | none (body ignored); acts only on the saved answers |
+| `/api/settings/get-started/bots` | `GET` | Gateway global auth; request principal required (`401` without) | No | n/a | none (no input); reads only the saved answers |
 
 Neither path is on the public, webhook, collaboration, route-scoped bearer or WebSocket query-token allowlists, so scoped run tokens, collaborators and app iframes cannot reach it.
 
@@ -213,12 +218,12 @@ Neither path is on the public, webhook, collaboration, route-scoped bearer or We
 - Concurrent PUTs: serialised per home; the second terminal transition sees the first and returns idempotent `200` or `409`.
 - Crash mid-write: temp + rename leaves either the old or the new file; stray temp files are dot-prefixed in `system/` and overwritten never (unique names); they are removed on the failure path.
 - Connect sign-in doesn't finish: "Sign-in didn't finish" with Try again / Skip.
-- Bot creation fails (P2): enter the desktop anyway. The saved answers are the durable intent: reading the finished setup retries any saved bot (at most every 10 minutes per owner, bounded per-owner memory), `POST /bots` retries on request, and Getting started keeps a Create action for a chosen bot that is missing. Fixed request IDs make retries idempotent; a bot the owner deleted is never brought back.
+- Bot creation fails (P2): enter the desktop anyway. The saved answers are the durable intent: reading the finished setup retries any saved bot (at most every 10 minutes per owner, bounded per-owner memory), `POST /bots` retries on request, and Getting started keeps a Create action for a chosen bot whose creation never finished (`GET /bots` says "pending"), even when part of it exists; a bot the owner removed stays hidden. Fixed request IDs make retries idempotent; a bot the owner deleted is never brought back, and a bot already created is never requested again. A retry replays the original request. If the recipe version changed since: an attempt that wrote its definition is finished from it (waiting for any request already finishing it, so it is never made twice), and one that never did starts again under a follow-up request named after the bot it reserved, so it is found again without new state; at most 4 attempts per bot.
 - Gateway unreachable on desktop load: don't show the wizard this session; try again on next load.
 
 ## Resource management
 
-- No in-memory caches; state is one small file per home.
+- State is one small file per home. The only in-memory state is the bot-retry cooldown: one timestamp per owner, capped at 256 owners with the oldest evicted.
 - Request bodies capped at 8 KiB; persisted draft capped at 4 KiB.
 - Connect polling (Section 4) keeps the widget's existing hard deadline and clears on unmount.
 
@@ -242,6 +247,9 @@ Each section is one layer, under the 3000-line limit, tests first.
    - Only apps in the computer's own integration catalog get a Connect button; service ids come from a fixed map in contracts.
    - v1 scope cut: agent sign-ins (Claude Code, Codex, OpenCode) and messaging channels (Telegram, WhatsApp, Email) show as "Later" and stay in Getting started / Settings. Inline agent sign-in through the provider workflow client is a follow-up.
 5. **Personalised arrival (P0):** Getting started and widget order by goal; greet by name. No new writes.
+   - Getting started stays until done once the wizard ended (finished or skipped), reopening once per load.
+   - Getting started adds a "Connect <tool>" row per picked tool the five steps don't already check (done when that integration is connected), a "Chat with <bot>" row per added bot (done once its direct chat has a message; opens that chat; dropped if the bot is removed), and an App Gallery link ("Build your <idea>" or "Build your first app") that is not counted, since building an app has no completion check.
+   - The widget's tasks lead with what the picked tools and starter unlock (Google Calendar → Plan my week, GitHub → Work on my code, Ask anything → Research, Build something small → Build a website), then the goal order.
    - The gate publishes the saved answers through `GetStartedAnswersProvider` (mounted next to `GettingStartedVisibilityProvider`), so the popovers and the widget read them without another request.
    - v1 reorders only; opening the widget straight into "Work on my code" and its repo question moves to Section 6.
 6. **First task and app building (P1):** "Work on my code" first with a "fix on a branch" follow-up; "Build an app for this" through the existing `[BUILD]` handoff.
@@ -255,6 +263,11 @@ Each section is one layer, under the 3000-line limit, tests first.
    - Writes reuse `readOwnerSoul` / `writeOwnerSoulAtomic` (16 KiB limit, control characters, no-follow, atomic). `identity.md` / `user.md` only get existing `- **Field:**` lines filled.
    - The Matrix Bot is created on the gateway after the state write and outside the file lock, with a fixed request id (`req_get-started-matrix-bot`), so retries replay instead of duplicating. A failure is logged and never blocks entering the desktop.
    - Still needs Hamed/Yuhan sign-off (spec 551 deferred creating the bot at onboarding). Avatar colour is deferred.
+7b. **Bots for you (P2):** a "Meet your bots" screen between the AI step and the summary suggests up to three ready-made bots from the Matrix Bot recipe catalog for the owner's goals (e.g. Daily Brief, Jev Inbox Triage, Writing Bot). Each card shows the bot's gallery avatar, its job and Add; a bot needing an app that is not connected offers that app's sign-in (or "Needs Gmail") instead of Add. Three short notes explain how bots work (one job each, no app access until granted, found in Chat). Skip clears the picks; the summary lists "Your bots".
+   - Only catalog recipe ids from a fixed map are accepted (max 3); `matrix-bot` is created only through the AI step.
+   - Created on completion through the same instantiation service as the Matrix Bot, one fixed request id per recipe (`req_get-started-<recipeId>`), outside the file lock, best effort.
+   - Creating a bot grants no app access; owners grant it per bot later. Needs the same Yuhan sign-off as Section 7.
+
 8. **Start during provisioning (optional, later):** platform-stored draft handed to the gateway on first boot.
 
 ## Not breaking anything
