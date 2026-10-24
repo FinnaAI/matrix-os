@@ -1,18 +1,19 @@
 "use client";
 
-import { useGettingStartedVisibility, useGettingStartedPopoverFocus, DesktopHelpMenu } from "@matrix-os/ui";
+import { useGettingStartedVisibility, useGettingStartedPopoverFocus, DesktopHelpMenu, useGetStartedAnswers, useGetStartedEnded } from "@matrix-os/ui";
 import { onboardingChecklist } from "@matrix-os/brand";
 import {
   deriveGettingStartedSnapshot,
   emptyGettingStartedSnapshot,
+  personalizeGettingStartedSteps,
   GETTING_STARTED_STEP_IDS,
   type GettingStartedSnapshot,
   type GettingStartedStep,
   type GettingStartedStepId,
 } from "@matrix-os/contracts";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Popover as PopoverPrimitive } from "radix-ui";
-import { CheckIcon, ClipboardCheck, DownloadIcon, Github } from "@/lib/hugeicons";
+import { CheckIcon, ClipboardCheck, CreditCard, DownloadIcon, Folder, Github, KeyRound, MailIcon } from "@/lib/hugeicons";
 import { getGatewayUrl } from "@/lib/gateway";
 import { SHELL_Z_INDEX } from "@/lib/shell-layering";
 
@@ -77,6 +78,14 @@ export function resolveDesktopDownloadSuggestion(
 
   return fallback;
 }
+
+const STEP_ICONS: Record<GettingStartedStepId, typeof Github> = {
+  github: Github,
+  "email-calendar": MailIcon,
+  agent: KeyRound,
+  "first-work": Folder,
+  billing: CreditCard,
+};
 
 export type GettingStartedSettingsSection = "integrations" | "agents-providers" | "billing";
 
@@ -190,6 +199,16 @@ function GettingStartedPopoverContent({
   const helpTriggerRef = useRef<HTMLButtonElement>(null);
   const [refreshRequest, setRefreshRequest] = useState(0);
   const [snapshot, setSnapshot] = useState(emptyGettingStartedSnapshot);
+  // Spec 635: lead with the steps that fit the owner's Get started answers.
+  const getStartedAnswers = useGetStartedAnswers();
+  const steps = useMemo(
+    () => (getStartedAnswers ? personalizeGettingStartedSteps(snapshot.steps, getStartedAnswers, snapshot.availableAgents) : snapshot.steps),
+    [getStartedAnswers, snapshot.steps, snapshot.availableAgents],
+  );
+  const completedCount = steps.filter((step) => step.status === "complete").length;
+  // After Get started, the checklist reopens on every load until done, but only once per load.
+  const getStartedEnded = useGetStartedEnded();
+  const autoOpenedThisLoad = useRef(false);
   const [downloadSuggestion, setDownloadSuggestion] = useState<DesktopDownloadSuggestion>({
     href: DESKTOP_APP_DOWNLOAD_URL,
     label: "Choose desktop download",
@@ -242,11 +261,13 @@ function GettingStartedPopoverContent({
       || isBlocked()
       || autoOpenSuppressed
       || isAutoOpenSuppressed()
-      || snapshot.completedCount === TOTAL_STEPS
-      || hasAutoOpened(autoOpenKey)
+      || completedCount === TOTAL_STEPS
+      || autoOpenedThisLoad.current
+      || (!getStartedEnded && hasAutoOpened(autoOpenKey))
     ) return;
+    autoOpenedThisLoad.current = true;
     setOpen(true);
-  }, [autoOpenKey, snapshot.completedCount, snapshot.loaded, blocked, isBlocked, autoOpenSuppressed, isAutoOpenSuppressed, setOpen]);
+  }, [autoOpenKey, getStartedEnded, completedCount, snapshot.loaded, blocked, isBlocked, autoOpenSuppressed, isAutoOpenSuppressed, setOpen]);
 
   useEffect(() => {
     if (!open) return;
@@ -299,8 +320,8 @@ function GettingStartedPopoverContent({
     }
   }, [open, isBlocked, autoOpenKey]);
 
-  const label = `Getting started — ${snapshot.completedCount} of ${TOTAL_STEPS}`;
-  const progress = `${(snapshot.completedCount / TOTAL_STEPS) * 100}%`;
+  const label = `Getting started — ${completedCount} of ${TOTAL_STEPS}`;
+  const progress = `${(completedCount / TOTAL_STEPS) * 100}%`;
 
   const trigger = (closeHelp?: () => void) => <PopoverPrimitive.Trigger asChild>
         <button
@@ -315,15 +336,15 @@ function GettingStartedPopoverContent({
           }}
         >
           <ClipboardCheck className="size-4" aria-hidden="true" />
-          {helpMenu ? <><span className="flex-1">Getting started</span><span className="text-xs">{snapshot.completedCount} of {TOTAL_STEPS}</span><span className="h-1 w-full overflow-hidden rounded" style={{ background: BRAND_COLORS.progressTrack }}><span className="block h-full" style={{ width: progress, background: BRAND_COLORS.progressFill }} /></span></> : null}
-          {!helpMenu && snapshot.completedCount < TOTAL_STEPS ? (
+          {helpMenu ? <><span className="flex-1">Getting started</span><span className="text-xs">{completedCount} of {TOTAL_STEPS}</span><span className="h-1 w-full overflow-hidden rounded" style={{ background: BRAND_COLORS.progressTrack }}><span className="block h-full" style={{ width: progress, background: BRAND_COLORS.progressFill }} /></span></> : null}
+          {!helpMenu && completedCount < TOTAL_STEPS ? (
             <span aria-hidden="true" className="absolute right-0.5 top-0.5 size-1.5 rounded-full bg-primary" />
           ) : null}
         </button>
       </PopoverPrimitive.Trigger>;
   return (
     <PopoverPrimitive.Root open={open} onOpenChange={handleRadixOpenChange}>
-      {helpMenu ? <DesktopHelpMenu {...helpMenu} incomplete={snapshot.completedCount < TOTAL_STEPS} gettingStarted={trigger}
+      {helpMenu ? <DesktopHelpMenu {...helpMenu} incomplete={completedCount < TOTAL_STEPS} gettingStarted={trigger}
         gettingStartedOpen={requestedOpen} onGettingStartedClose={() => setOpen(false)} triggerRef={helpTriggerRef}
         anchorTrigger={(helpTrigger) => <PopoverPrimitive.Anchor asChild>{helpTrigger}</PopoverPrimitive.Anchor>} /> : trigger()}
       <PopoverPrimitive.Portal>
@@ -361,7 +382,7 @@ function GettingStartedPopoverContent({
               data-testid="getting-started-counter"
               style={{ color: BRAND_COLORS.subtleText, fontSize: 11, fontWeight: 500, lineHeight: "normal" }}
             >
-              {snapshot.completedCount} of {TOTAL_STEPS}
+              {completedCount} of {TOTAL_STEPS}
             </span>
           </div>
           <div className="px-3 pb-4">
@@ -394,8 +415,9 @@ function GettingStartedPopoverContent({
                 ) : null}
               </span>
             </a>
-            {snapshot.steps.map((step) => {
+            {steps.map((step) => {
               const complete = step.status === "complete";
+              const StepIcon = STEP_ICONS[step.id];
               return (
                 <button
                   key={step.id}
@@ -417,9 +439,7 @@ function GettingStartedPopoverContent({
                   >
                     {step.label}
                   </span>
-                  {step.id === "github" ? (
-                    <Github className="size-4" aria-hidden="true" style={{ color: BRAND_COLORS.subtleText }} />
-                  ) : null}
+                  <StepIcon className="size-4 shrink-0" aria-hidden="true" style={{ color: BRAND_COLORS.subtleText }} />
                 </button>
               );
             })}
