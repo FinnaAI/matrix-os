@@ -1727,6 +1727,7 @@ export async function createGateway(config: GatewayConfig) {
       });
     }
   }
+  // Bind deletion and run tombstone recovery only after Chat dependencies are ready.
   const workspaceStartupRecoveryController = await registerWorkspaceLifecycle({
     app, shellRoutes: createShellRoutes(shellRouteDeps), chatRepository,
     orchestrator: canonicalChatOrchestrator, collaboration: gatewayCollaboration,
