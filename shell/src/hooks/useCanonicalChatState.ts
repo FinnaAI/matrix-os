@@ -95,7 +95,8 @@ export function useCanonicalChatState({ initialDraft, initialCollaborationView, 
 } = {}): ChatState {
   const [mentionRequests] = useState(createChatMentionRequestTracker);
   const [admissions] = useState(createCanonicalChatAdmissionTracker);
-  const client = useMemo(() => createCanonicalShellChatClient({ gatewayUrl: getGatewayUrl() }), []);
+  const [gatewayUrl] = useState(getGatewayUrl);
+  const client = useMemo(() => createCanonicalShellChatClient({ gatewayUrl }), [gatewayUrl]);
   const eventSource = useMemo(() => createSharedCanonicalChatEventSource({
     openStream: (input) => client.openEventStream(input),
   }), [client]);
@@ -732,6 +733,21 @@ export function useCanonicalChatState({ initialDraft, initialCollaborationView, 
     }
   }, [client, records, loadList, loadDetail, setRecords, isCurrent]);
 
+  /** Permanent; the dialog owns failure copy, so this only reports success. */
+  const deleteConversation = useCallback(async (chatId: string) => {
+    if (!isCurrent()) return false;
+    try {
+      await client.delete(chatId, requestId());
+      if (!isCurrent()) return false;
+      setRecords((existing) => existing.filter((record) => record.chat.id !== chatId));
+      if (activeChatIdRef.current === chatId) await newChat();
+      return true;
+    } catch (error: unknown) {
+      console.warn("[canonical-chat] Shell delete failed:", error instanceof Error ? error.name : "UnknownError");
+      return false;
+    }
+  }, [client, setRecords, newChat, isCurrent]);
+
   const updateReadState = useCallback(async (chatId: string, input: import("@matrix-os/contracts").CanonicalUpdateChatReadStateRequest) => {
     if (!isCurrent()) return false;
     try {
@@ -790,6 +806,7 @@ export function useCanonicalChatState({ initialDraft, initialCollaborationView, 
     browserPermissions: client.browserPermissions,
     agentSummaryClient: authority.summaryClient,
     authorityKey: navigationIdentity,
+    gatewayUrl,
     composerIdentity,
     isCurrentAuthority: isCurrent,
     botEventRevision,
@@ -805,6 +822,7 @@ export function useCanonicalChatState({ initialDraft, initialCollaborationView, 
     navigationClassifications: unreadNavigation.items.map(item=>({chatId:item.chat.id,classification:item.classification})),
     activeConversationTitle: activeRecord?.chat.title,
     renameConversation,
+    deleteConversation,
     composerDraftRequest: sameAuthority && previousComposerIdentity.current === composerIdentity ? composerDraftRequest : null,
     requestComposerDraft: (text, options) => {
       if (isCurrent()) setComposerDraftRequest({ id: ++composerDraftSequence.current, text, ...(options?.merge ? { merge: true } : {}) });
