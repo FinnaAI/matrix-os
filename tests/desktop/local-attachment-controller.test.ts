@@ -50,6 +50,21 @@ describe("local Desktop attachment controller", () => {
     expect(items[1]).toMatchObject({ status: "failed", error: "Files are limited to 10 MiB." });
   });
 
+  it("reports overflow while preserving all eight accepted files and clears feedback on removal", () => {
+    const controller = createLocalAttachmentController({ api: {} as never });
+    const eight = Array.from({ length: 8 }, (_, index) => file(`accepted-${index}.txt`, 1));
+    controller.add(eight);
+    controller.add([file("ninth.txt", 1), file("tenth.txt", 1)]);
+    expect(controller.getSnapshot().map(item => item.file.name)).toEqual(eight.map(item => item.name));
+    expect(controller.getSelectionError()).toBe("You can attach up to 8 files. 2 files were not added.");
+    controller.remove(controller.getSnapshot()[0]!.localId);
+    expect(controller.getSelectionError()).toBeNull();
+    controller.add([file("replacement.txt", 1)]);
+    expect(controller.getSnapshot().at(-1)?.file.name).toBe("replacement.txt");
+    expect(controller.getSelectionError()).toBeNull();
+    controller.dispose();
+  });
+
   it("rechecks the current complete-selection policy before retrying a failed upload", async () => {
     const putBytes = vi.fn().mockRejectedValue(new Error("offline"));
     let error: string | null = null;
@@ -66,6 +81,30 @@ describe("local Desktop attachment controller", () => {
     await controller.retry(localId);
     expect(putBytes).toHaveBeenCalledTimes(2);
     expect(controller.getSnapshot()[0]!.status).toBe("ready");
+    controller.dispose();
+  });
+
+  it("keeps overflow feedback frozen until an uploading selection can be cleared", async () => {
+    let finish!: () => void;
+    const gate = new Promise<void>(resolve => { finish = resolve; });
+    const putBytes = vi.fn(async (url: string, uploaded: File) => {
+      await gate;
+      return { path: decodeURIComponent(url.split("path=")[1]!), size: uploaded.size };
+    });
+    const controller = createLocalAttachmentController({ api: { putBytes } as never });
+    controller.add(Array.from({ length: 9 }, (_, index) => file(`case-${index}.txt`, 1)));
+    const feedback = controller.getSelectionError();
+    expect(feedback).not.toBeNull();
+    const uploading = controller.uploadAll();
+    await vi.waitFor(() => expect(putBytes).toHaveBeenCalledTimes(3));
+    controller.clear();
+    expect(controller.getSelectionError()).toBe(feedback);
+    expect(controller.getSnapshot()).toHaveLength(8);
+    finish();
+    await expect(uploading).resolves.toMatchObject({ ok: true });
+    controller.clear();
+    expect(controller.getSelectionError()).toBeNull();
+    expect(controller.getSnapshot()).toEqual([]);
     controller.dispose();
   });
 
